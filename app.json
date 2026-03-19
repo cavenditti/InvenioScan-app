@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "InvenioScan",
+    "slug": "invenioscan",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#f4efe6"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to scan shelf QR codes, read barcodes, and capture book covers."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow $(PRODUCT_NAME) to scan shelf QR codes, read barcodes, and capture book covers."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#f4efe6"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
