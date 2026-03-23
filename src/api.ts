@@ -27,18 +27,29 @@ export type ImageIngestPayload = {
   fileName?: string;
 };
 
+export type IngestResponse = {
+  status: string;
+  book_id: number;
+  copy_id: number;
+  scan_id: string;
+};
+
 async function parseJson(response: Response) {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
 }
 
 export async function login(baseUrl: string, username: string, password: string): Promise<LoginResponse> {
+  const body = new URLSearchParams();
+  body.append('username', username);
+  body.append('password', password);
+
   const response = await fetch(`${baseUrl}/api/v1/auth/login`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: JSON.stringify({ username, password }),
+    body: body.toString(),
   });
 
   const data = await parseJson(response);
@@ -48,7 +59,7 @@ export async function login(baseUrl: string, username: string, password: string)
   return data as LoginResponse;
 }
 
-export async function submitIsbnIngest(baseUrl: string, token: string, payload: IsbnIngestPayload) {
+export async function submitIsbnIngest(baseUrl: string, token: string, payload: IsbnIngestPayload): Promise<IngestResponse> {
   const response = await fetch(`${baseUrl}/api/v1/ingest`, {
     method: 'POST',
     headers: {
@@ -68,10 +79,10 @@ export async function submitIsbnIngest(baseUrl: string, token: string, payload: 
   if (!response.ok) {
     throw new Error(data?.detail ?? 'Ingest failed');
   }
-  return data;
+  return data as IngestResponse;
 }
 
-export async function submitImageIngest(baseUrl: string, token: string, payload: ImageIngestPayload) {
+export async function submitImageIngest(baseUrl: string, token: string, payload: ImageIngestPayload): Promise<IngestResponse> {
   const formData = new FormData();
   formData.append('shelf_id', payload.shelf.shelf_id);
   formData.append('row', payload.shelf.row);
@@ -101,5 +112,5 @@ export async function submitImageIngest(baseUrl: string, token: string, payload:
   if (!response.ok) {
     throw new Error(data?.detail ?? 'Image ingest failed');
   }
-  return data;
+  return data as IngestResponse;
 }
