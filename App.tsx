@@ -125,10 +125,14 @@ export default function App() {
   async function handleLogin() {
     try {
       setLoading(true);
-      const session = await login(baseUrl.trim(), username.trim(), password);
-      await saveSession(session.access_token, baseUrl.trim());
+      const normalizedBaseUrl = baseUrl.trim();
+      const normalizedUsername = username.trim();
+      const session = await login(normalizedBaseUrl, normalizedUsername, password);
       setToken(session.access_token);
+      setBaseUrl(normalizedBaseUrl);
       setStatusMessage('Scan a shelf QR code to begin.');
+
+      saveSession(session.access_token, normalizedBaseUrl).catch(() => undefined);
     } catch (error) {
       Alert.alert('Login failed', error instanceof Error ? error.message : 'Unknown error');
     } finally {
