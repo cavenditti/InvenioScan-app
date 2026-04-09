@@ -229,7 +229,7 @@ export default function App() {
       const parsedShelf = parseShelfPayload(result.data);
       lockScanner();
       if (!parsedShelf) {
-        setStatusMessage('Ignored QR code that is not an InvenioScan shelf tag.');
+        setStatusMessage('Ignored QR code that is not a Shelfscan shelf tag.');
         return;
       }
 
@@ -276,7 +276,7 @@ export default function App() {
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.hero}>
-          <Text style={styles.kicker}>InvenioScan</Text>
+          <Text style={styles.kicker}>Shelfscan</Text>
           <Text style={styles.title}>Shelf first, then scan fast</Text>
           <Text style={styles.subtitle}>
             QR shelves and barcodes are auto-detected. Use the cover button when a barcode is missing.

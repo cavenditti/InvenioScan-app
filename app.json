@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "InvenioScan",
-    "slug": "invenioscan",
+    "name": "Shelfscan",
+    "slug": "shelfscan",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",

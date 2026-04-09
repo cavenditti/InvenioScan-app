@@ -1,12 +1,11 @@
 # App
 
 > I'm helping a friend moving lots of books.
-> I wanted to build a system to quickly ingest a large number of items into InvenioILS using QR codes and a mobile app.
+> I wanted to build a system to quickly track where books end up on shelves using QR codes and a mobile app.
 > Claude (and others) are helping me helping my friend. 🙂
-> (I later decided to not use InvenioILS at all)
 > This repo is the codebase for that project.
 
-This repository contains the Expo mobile client for the main InvenioScan project:
+This repository contains the Expo mobile client for the main Shelfscan project:
 https://github.com/cavenditti/invenioScan
 
 Minimal Expo client for the first implementation slice.
