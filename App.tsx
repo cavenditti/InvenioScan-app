@@ -13,6 +13,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
@@ -53,7 +54,9 @@ export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { width } = useWindowDimensions();
   const isWeb = Platform.OS === 'web';
+  const isCompactWebLayout = isWeb && width < 520;
 
   const shelfReady = Boolean(
     form.shelfId.trim() && form.row.trim() && form.position.trim() && form.height.trim()
@@ -65,7 +68,7 @@ export default function App() {
   const cameraModeLabel = scannerMode === 'shelf'
     ? 'Mode: shelf QR'
     : isWeb
-      ? 'Mode: manual ISBN or cover capture'
+      ? 'Mode: ISBN optional, cover capture available'
       : 'Mode: book barcode';
 
   useEffect(() => {
@@ -221,7 +224,7 @@ export default function App() {
       });
 
       setLastResponse(JSON.stringify(response, null, 2));
-      setStatusMessage('Queued cover image upload');
+      setStatusMessage('Queued cover image upload. No ISBN required.');
       resetBookMetadata();
     } catch (error) {
       Alert.alert('Image ingest failed', error instanceof Error ? error.message : 'Unknown error');
@@ -274,7 +277,7 @@ export default function App() {
       if (source === 'manual') {
         setManualScanValue('');
       }
-      setStatusMessage(`Shelf ${parsedShelf.shelfId} ready. Scan a barcode or capture a cover.`);
+      setStatusMessage(`Shelf ${parsedShelf.shelfId} ready. Scan a barcode, or capture a cover if the book has no ISBN.`);
       return;
     }
 
@@ -344,12 +347,12 @@ export default function App() {
         ) : (
           <>
             <View style={styles.card}>
-              <View style={styles.cardHeaderRow}>
-                <View>
+              <View style={[styles.cardHeaderRow, isCompactWebLayout && styles.cardHeaderStack]}>
+                <View style={styles.cardHeaderContent}>
                   <Text style={styles.cardTitle}>Session active</Text>
                   <Text style={styles.caption}>{baseUrl}</Text>
                 </View>
-                <Pressable style={styles.secondaryButton} onPress={handleLogout}>
+                <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={handleLogout}>
                   <Text style={styles.secondaryButtonText}>Logout</Text>
                 </Pressable>
               </View>
@@ -357,13 +360,13 @@ export default function App() {
             </View>
 
             <View style={styles.card}>
-              <View style={styles.cardHeaderRow}>
-                <View>
+              <View style={[styles.cardHeaderRow, isCompactWebLayout && styles.cardHeaderStack]}>
+                <View style={styles.cardHeaderContent}>
                   <Text style={styles.cardTitle}>Camera</Text>
                   <Text style={styles.caption}>{cameraModeLabel}</Text>
                 </View>
                 {shelfReady ? (
-                  <Pressable style={styles.secondaryButton} onPress={clearShelf}>
+                  <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={clearShelf}>
                     <Text style={styles.secondaryButtonText}>Done with shelf</Text>
                   </Pressable>
                 ) : null}
@@ -392,7 +395,7 @@ export default function App() {
                         {scannerMode === 'shelf'
                           ? 'Align shelf QR tag'
                           : isWeb
-                            ? 'Use manual ISBN entry or capture a cover'
+                            ? 'ISBN optional: enter it manually or capture the cover'
                             : 'Align book barcode'}
                       </Text>
                     </View>
@@ -415,7 +418,7 @@ export default function App() {
                   <Text style={styles.caption}>
                     {scannerMode === 'shelf'
                       ? 'Browser QR detection can be unreliable. Paste the invscan://shelf/... payload here if the camera misses it.'
-                      : 'Expo web barcode support is limited. Paste or type the ISBN if the camera does not detect it.'}
+                      : 'Expo web barcode support is limited. Paste the ISBN if needed, or skip it and submit only the cover image.'}
                   </Text>
                   <Field
                     label={scannerMode === 'shelf' ? 'Shelf QR payload' : 'ISBN / barcode value'}
@@ -559,6 +562,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  cardHeaderStack: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  cardHeaderContent: {
+    flex: 1,
+    minWidth: 0,
+  },
   caption: {
     color: '#7d684f',
   },
@@ -664,6 +675,9 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: '#8b5e34',
     fontWeight: '700',
+  },
+  secondaryButtonCompact: {
+    alignSelf: 'flex-start',
   },
   buttonDisabled: {
     opacity: 0.55,

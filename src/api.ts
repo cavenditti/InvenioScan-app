@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 export type LoginResponse = {
   access_token: string;
   token_type: string;
@@ -37,6 +39,32 @@ export type IngestResponse = {
 async function parseJson(response: Response) {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
+}
+
+
+async function appendImageUpload(formData: FormData, payload: ImageIngestPayload) {
+  const fileName = payload.fileName ?? 'cover.jpg';
+  const mimeType = payload.mimeType ?? 'image/jpeg';
+
+  if (Platform.OS === 'web') {
+    const imageResponse = await fetch(payload.imageUri);
+    if (!imageResponse.ok) {
+      throw new Error('Could not read the captured image before upload.');
+    }
+
+    const imageBlob = await imageResponse.blob();
+    const imageFile = new File([imageBlob], fileName, {
+      type: imageBlob.type || mimeType,
+    });
+    formData.append('image', imageFile);
+    return;
+  }
+
+  formData.append('image', {
+    uri: payload.imageUri,
+    name: fileName,
+    type: mimeType,
+  } as never);
 }
 
 export async function login(baseUrl: string, username: string, password: string): Promise<LoginResponse> {
@@ -94,11 +122,7 @@ export async function submitImageIngest(baseUrl: string, token: string, payload:
   if (payload.author) {
     formData.append('author', payload.author);
   }
-  formData.append('image', {
-    uri: payload.imageUri,
-    name: payload.fileName ?? 'cover.jpg',
-    type: payload.mimeType ?? 'image/jpeg',
-  } as never);
+  await appendImageUpload(formData, payload);
 
   const response = await fetch(`${baseUrl}/api/v1/ingest/upload`, {
     method: 'POST',

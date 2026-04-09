@@ -16,6 +16,7 @@ Minimal Expo client for the first implementation slice.
 - Persist the JWT and backend URL in secure storage.
 - Submit manual ingest requests with shelf metadata.
 - On web, paste shelf QR payloads or ISBNs when browser scanning is unreliable.
+- Capture and upload a book cover even when no ISBN is available.
 - Optionally fill in title and author.
 
 ## Run
