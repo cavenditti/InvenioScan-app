@@ -15,6 +15,7 @@ Minimal Expo client for the first implementation slice.
 - Login against the FastAPI backend.
 - Persist the JWT and backend URL in secure storage.
 - Submit manual ingest requests with shelf metadata.
+- On web, paste shelf QR payloads or ISBNs when browser scanning is unreliable.
 - Optionally fill in title and author.
 
 ## Run

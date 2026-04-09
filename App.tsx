@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -47,10 +48,12 @@ export default function App() {
   const [scanLocked, setScanLocked] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Scan a shelf QR code to begin.');
   const [lastResponse, setLastResponse] = useState<string>('');
+  const [manualScanValue, setManualScanValue] = useState('');
   const [form, setForm] = useState<FormState>(initialFormState);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isWeb = Platform.OS === 'web';
 
   const shelfReady = Boolean(
     form.shelfId.trim() && form.row.trim() && form.position.trim() && form.height.trim()
@@ -59,6 +62,11 @@ export default function App() {
   const barcodeTypes: BarcodeType[] = scannerMode === 'shelf'
     ? ['qr']
     : ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'];
+  const cameraModeLabel = scannerMode === 'shelf'
+    ? 'Mode: shelf QR'
+    : isWeb
+      ? 'Mode: manual ISBN or cover capture'
+      : 'Mode: book barcode';
 
   useEffect(() => {
     async function restoreSession() {
@@ -224,16 +232,35 @@ export default function App() {
     }
   }
 
-  async function handleBarcodeScanned(result: { data: string; type: string }) {
-    if (!token || submitting || scanLocked) {
+  async function handleScannedValue(value: string, source: 'camera' | 'manual') {
+    if (!token || submitting || (source === 'camera' && scanLocked)) {
+      return;
+    }
+
+    const scannedValue = value.trim();
+    if (!scannedValue) {
+      if (source === 'manual') {
+        setStatusMessage(
+          scannerMode === 'shelf'
+            ? 'Paste a shelf QR payload or fill the shelf fields below.'
+            : 'Paste or type an ISBN-10 or ISBN-13 value.'
+        );
+      }
       return;
     }
 
     if (scannerMode === 'shelf') {
-      const parsedShelf = parseShelfPayload(result.data);
-      lockScanner();
+      const parsedShelf = parseShelfPayload(scannedValue);
+      if (source === 'camera') {
+        lockScanner();
+      }
+
       if (!parsedShelf) {
-        setStatusMessage('Ignored QR code that is not a Shelfscan shelf tag.');
+        setStatusMessage(
+          source === 'manual'
+            ? 'Could not parse that shelf QR payload. Paste the full invscan://shelf/... value or fill the shelf fields below.'
+            : 'Ignored QR code that is not a Shelfscan shelf tag.'
+        );
         return;
       }
 
@@ -244,16 +271,33 @@ export default function App() {
         position: String(parsedShelf.position),
         height: String(parsedShelf.height),
       }));
+      if (source === 'manual') {
+        setManualScanValue('');
+      }
       setStatusMessage(`Shelf ${parsedShelf.shelfId} ready. Scan a barcode or capture a cover.`);
       return;
     }
 
-    const isbn = normalizeScannedIsbn(result.data);
+    const isbn = normalizeScannedIsbn(scannedValue);
     if (!isbn) {
+      if (source === 'manual') {
+        setStatusMessage('That value is not a valid ISBN-10 or ISBN-13.');
+      }
       return;
     }
 
+    if (source === 'manual') {
+      setManualScanValue('');
+    }
     await submitIsbn(isbn);
+  }
+
+  function handleBarcodeScanned(result: { data: string; type: string }) {
+    void handleScannedValue(result.data, 'camera');
+  }
+
+  function handleManualScanSubmit() {
+    void handleScannedValue(manualScanValue, 'manual');
   }
 
   function clearShelf() {
@@ -316,9 +360,7 @@ export default function App() {
               <View style={styles.cardHeaderRow}>
                 <View>
                   <Text style={styles.cardTitle}>Camera</Text>
-                  <Text style={styles.caption}>
-                    {scannerMode === 'shelf' ? 'Mode: shelf QR' : 'Mode: book barcode'}
-                  </Text>
+                  <Text style={styles.caption}>{cameraModeLabel}</Text>
                 </View>
                 {shelfReady ? (
                   <Pressable style={styles.secondaryButton} onPress={clearShelf}>
@@ -343,20 +385,57 @@ export default function App() {
                     mode="picture"
                     barcodeScannerSettings={{ barcodeTypes }}
                     onBarcodeScanned={handleBarcodeScanned}
-                  >
-                    <View style={styles.cameraOverlay}>
-                      <View style={styles.cameraBadge}>
-                        <Text style={styles.cameraBadgeText}>
-                          {scannerMode === 'shelf' ? 'Align shelf QR tag' : 'Align book barcode'}
-                        </Text>
-                      </View>
-                      <Pressable style={styles.captureButton} onPress={handleCaptureCover} disabled={!shelfReady || submitting}>
-                        <Text style={styles.captureButtonText}>{submitting ? 'Working...' : 'Capture cover'}</Text>
-                      </Pressable>
+                  />
+                  <View pointerEvents="box-none" style={styles.cameraOverlay}>
+                    <View style={styles.cameraBadge}>
+                      <Text style={styles.cameraBadgeText}>
+                        {scannerMode === 'shelf'
+                          ? 'Align shelf QR tag'
+                          : isWeb
+                            ? 'Use manual ISBN entry or capture a cover'
+                            : 'Align book barcode'}
+                      </Text>
                     </View>
-                  </CameraView>
+                    <Pressable
+                      style={[styles.captureButton, (!shelfReady || submitting) && styles.buttonDisabled]}
+                      onPress={handleCaptureCover}
+                      disabled={!shelfReady || submitting}
+                    >
+                      <Text style={styles.captureButtonText}>{submitting ? 'Working...' : 'Capture cover'}</Text>
+                    </Pressable>
+                  </View>
                 </View>
               )}
+
+              {isWeb ? (
+                <View style={styles.manualScanBox}>
+                  <Text style={styles.manualScanTitle}>
+                    {scannerMode === 'shelf' ? 'Manual shelf QR fallback' : 'Manual ISBN fallback'}
+                  </Text>
+                  <Text style={styles.caption}>
+                    {scannerMode === 'shelf'
+                      ? 'Browser QR detection can be unreliable. Paste the invscan://shelf/... payload here if the camera misses it.'
+                      : 'Expo web barcode support is limited. Paste or type the ISBN if the camera does not detect it.'}
+                  </Text>
+                  <Field
+                    label={scannerMode === 'shelf' ? 'Shelf QR payload' : 'ISBN / barcode value'}
+                    value={manualScanValue}
+                    onChangeText={setManualScanValue}
+                    autoCapitalize="none"
+                    keyboardType={scannerMode === 'shelf' ? 'default' : 'numbers-and-punctuation'}
+                    placeholder={scannerMode === 'shelf' ? 'invscan://shelf/A1?v=1&row=A&position=1&height=3' : '9781234567897'}
+                  />
+                  <Pressable
+                    style={[styles.primaryButton, (!manualScanValue.trim() || submitting) && styles.buttonDisabled]}
+                    onPress={handleManualScanSubmit}
+                    disabled={!manualScanValue.trim() || submitting}
+                  >
+                    <Text style={styles.primaryButtonText}>
+                      {scannerMode === 'shelf' ? 'Use pasted shelf tag' : 'Use pasted ISBN'}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
             </View>
 
             <View style={styles.card}>
@@ -494,12 +573,13 @@ const styles = StyleSheet.create({
     height: 360,
     overflow: 'hidden',
     borderRadius: 20,
+    position: 'relative',
   },
   camera: {
     flex: 1,
   },
   cameraOverlay: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
     padding: 16,
     backgroundColor: 'rgba(20, 12, 4, 0.16)',
@@ -526,6 +606,17 @@ const styles = StyleSheet.create({
     color: '#6d3d14',
     fontWeight: '700',
     fontSize: 16,
+  },
+  manualScanBox: {
+    gap: 12,
+    paddingTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#e8dbc6',
+  },
+  manualScanTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2e2418',
   },
   fieldGroup: {
     gap: 6,
@@ -573,6 +664,9 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: '#8b5e34',
     fontWeight: '700',
+  },
+  buttonDisabled: {
+    opacity: 0.55,
   },
   responseText: {
     fontFamily: 'Courier',
