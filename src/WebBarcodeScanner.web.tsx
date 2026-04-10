@@ -35,15 +35,16 @@ const MAX_CAPTURE_WIDTH = 1200;
 const DUPLICATE_WINDOW_MS = 1400;
 const SHELF_SCAN_INTERVAL_MS = 180;
 
-const SCAN_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
+const BASE_SCAN_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: { ideal: 'environment' },
   width: { ideal: 1280 },
   height: { ideal: 720 },
+  aspectRatio: { ideal: 4 / 3 },
 };
 
 const SCAN_CONSTRAINTS: MediaStreamConstraints = {
   audio: false,
-  video: SCAN_VIDEO_CONSTRAINTS,
+  video: BASE_SCAN_VIDEO_CONSTRAINTS,
 };
 
 const SCAN_FORMATS: Record<WebBarcodeScannerMode, BarcodeFormat[]> = {
@@ -72,14 +73,18 @@ const BOOK_SCAN_AREA: NonNullable<NonNullable<QuaggaJSConfigObject['inputStream'
 };
 
 const videoStyle: CSSProperties = {
+  position: 'absolute',
+  inset: '0',
   width: '100%',
   height: '100%',
-  objectFit: 'contain',
+  objectFit: 'cover',
+  objectPosition: 'center center',
   display: 'block',
   backgroundColor: '#1c140d',
 };
 
 const quaggaTargetStyle: CSSProperties = {
+  position: 'relative',
   width: '100%',
   height: '100%',
   overflow: 'hidden',
@@ -115,8 +120,70 @@ function getScannerErrorMessage(error: unknown) {
 }
 
 
-async function attachCameraStream(video: HTMLVideoElement) {
-  const stream = await navigator.mediaDevices.getUserMedia(SCAN_CONSTRAINTS);
+function scoreVideoDevice(label: string) {
+  const normalizedLabel = label.trim().toLowerCase();
+  if (!normalizedLabel) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+
+  if (normalizedLabel === 'back camera' || normalizedLabel === 'rear camera') {
+    score += 140;
+  }
+  if (normalizedLabel.includes('back') || normalizedLabel.includes('rear') || normalizedLabel.includes('environment')) {
+    score += 100;
+  }
+  if (normalizedLabel.includes('facetime') || normalizedLabel.includes('front') || normalizedLabel.includes('user')) {
+    score -= 120;
+  }
+  if (normalizedLabel.includes('ultra') || normalizedLabel.includes('0.5') || normalizedLabel.includes('wide')) {
+    score -= 75;
+  }
+  if (normalizedLabel.includes('continuity')) {
+    score -= 24;
+  }
+  if (normalizedLabel.includes('desk view')) {
+    score -= 200;
+  }
+
+  return score;
+}
+
+
+async function resolvePreferredVideoConstraints() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    return BASE_SCAN_VIDEO_CONSTRAINTS;
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter((device) => device.kind === 'videoinput');
+    const preferredDevice = videoInputs
+      .map((device) => ({ device, score: scoreVideoDevice(device.label) }))
+      .filter((entry) => Number.isFinite(entry.score) && entry.score > 0)
+      .sort((left, right) => right.score - left.score)[0]?.device;
+
+    if (!preferredDevice) {
+      return BASE_SCAN_VIDEO_CONSTRAINTS;
+    }
+
+    return {
+      ...BASE_SCAN_VIDEO_CONSTRAINTS,
+      deviceId: { exact: preferredDevice.deviceId },
+      facingMode: undefined,
+    } satisfies MediaTrackConstraints;
+  } catch {
+    return BASE_SCAN_VIDEO_CONSTRAINTS;
+  }
+}
+
+
+async function attachCameraStream(video: HTMLVideoElement, videoConstraints: MediaTrackConstraints) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    ...SCAN_CONSTRAINTS,
+    video: videoConstraints,
+  });
   video.srcObject = stream;
 
   if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
@@ -326,6 +393,8 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
 
     void (async () => {
       try {
+        const videoConstraints = await resolvePreferredVideoConstraints();
+
         if (mode === 'shelf') {
           await stopBookScanner();
           const video = videoRef.current;
@@ -333,7 +402,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
             return;
           }
 
-          const stream = await attachCameraStream(video);
+          const stream = await attachCameraStream(video, videoConstraints);
           if (!active) {
             stream.getTracks().forEach((track) => track.stop());
             return;
@@ -397,7 +466,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
           inputStream: {
             type: 'LiveStream',
             target,
-            constraints: SCAN_VIDEO_CONSTRAINTS,
+            constraints: videoConstraints,
             area: BOOK_SCAN_AREA,
             willReadFrequently: true,
           },
