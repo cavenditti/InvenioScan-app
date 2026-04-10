@@ -20,6 +20,7 @@ import {
 import { login, submitImageIngest, submitIsbnIngest } from './src/api';
 import { normalizeScannedIsbn, parseShelfPayload } from './src/scanner';
 import { clearSession, loadSession, saveSession } from './src/storage';
+import WebBarcodeScanner, { type WebBarcodeScannerCapture, type WebBarcodeScannerHandle } from './src/WebBarcodeScanner';
 
 type FormState = {
   shelfId: string;
@@ -29,6 +30,8 @@ type FormState = {
   title: string;
   author: string;
 };
+
+type ScanSource = 'camera' | 'manual';
 
 const initialFormState: FormState = {
   shelfId: '',
@@ -48,11 +51,14 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [scanLocked, setScanLocked] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Scan a shelf QR code to begin.');
+  const [lastDetectedValue, setLastDetectedValue] = useState('');
+  const [lastDetectedSource, setLastDetectedSource] = useState<ScanSource | null>(null);
   const [lastResponse, setLastResponse] = useState<string>('');
   const [manualScanValue, setManualScanValue] = useState('');
   const [form, setForm] = useState<FormState>(initialFormState);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
+  const webScannerRef = useRef<WebBarcodeScannerHandle | null>(null);
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { width } = useWindowDimensions();
   const isWeb = Platform.OS === 'web';
@@ -68,7 +74,7 @@ export default function App() {
   const cameraModeLabel = scannerMode === 'shelf'
     ? 'Mode: shelf QR'
     : isWeb
-      ? 'Mode: ISBN optional, cover capture available'
+      ? 'Mode: live ISBN scan, cover capture available'
       : 'Mode: book barcode';
 
   useEffect(() => {
@@ -154,6 +160,8 @@ export default function App() {
   async function handleLogout() {
     await clearSession();
     setToken(null);
+    setLastDetectedValue('');
+    setLastDetectedSource(null);
     setLastResponse('');
     setForm(initialFormState);
     setStatusMessage('Scan a shelf QR code to begin.');
@@ -191,7 +199,7 @@ export default function App() {
   }
 
   async function handleCaptureCover() {
-    if (!cameraRef.current || !token) {
+    if (!token) {
       return;
     }
 
@@ -201,26 +209,49 @@ export default function App() {
       return;
     }
 
+    let webCapture: WebBarcodeScannerCapture | null = null;
+
     try {
       setSubmitting(true);
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, skipProcessing: false });
-      if (!photo?.uri) {
-        throw new Error('Camera did not return an image.');
-      }
+      let imageUri = '';
+      let mimeType = 'image/jpeg';
+      let fileName = `cover-${Date.now()}.jpg`;
 
-      const manipulated = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 1200 } }],
-        { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG }
-      );
+      if (isWeb) {
+        if (!webScannerRef.current) {
+          throw new Error('Web camera preview is not ready yet.');
+        }
+
+        webCapture = await webScannerRef.current.captureImageAsync();
+        imageUri = webCapture.uri;
+        mimeType = webCapture.mimeType;
+        fileName = webCapture.fileName;
+      } else {
+        if (!cameraRef.current) {
+          throw new Error('Camera preview is not ready yet.');
+        }
+
+        const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, skipProcessing: false });
+        if (!photo?.uri) {
+          throw new Error('Camera did not return an image.');
+        }
+
+        const manipulated = await ImageManipulator.manipulateAsync(
+          photo.uri,
+          [{ resize: { width: 1200 } }],
+          { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG }
+        );
+
+        imageUri = manipulated.uri;
+      }
 
       const response = await submitImageIngest(baseUrl.trim(), token, {
         shelf,
-        imageUri: manipulated.uri,
+        imageUri,
         title: form.title.trim() || undefined,
         author: form.author.trim() || undefined,
-        mimeType: 'image/jpeg',
-        fileName: `cover-${Date.now()}.jpg`,
+        mimeType,
+        fileName,
       });
 
       setLastResponse(JSON.stringify(response, null, 2));
@@ -230,12 +261,13 @@ export default function App() {
       Alert.alert('Image ingest failed', error instanceof Error ? error.message : 'Unknown error');
       setStatusMessage('Image ingest failed.');
     } finally {
+      webCapture?.revokeUri?.();
       setSubmitting(false);
       lockScanner(1500);
     }
   }
 
-  async function handleScannedValue(value: string, source: 'camera' | 'manual') {
+  async function handleScannedValue(value: string, source: ScanSource) {
     if (!token || submitting || (source === 'camera' && scanLocked)) {
       return;
     }
@@ -251,6 +283,9 @@ export default function App() {
       }
       return;
     }
+
+    setLastDetectedValue(scannedValue);
+    setLastDetectedSource(source);
 
     if (scannerMode === 'shelf') {
       const parsedShelf = parseShelfPayload(scannedValue);
@@ -283,9 +318,11 @@ export default function App() {
 
     const isbn = normalizeScannedIsbn(scannedValue);
     if (!isbn) {
-      if (source === 'manual') {
-        setStatusMessage('That value is not a valid ISBN-10 or ISBN-13.');
-      }
+      setStatusMessage(
+        source === 'manual'
+          ? `That value is not a valid ISBN-10 or ISBN-13. Raw value: ${scannedValue}`
+          : `Detected barcode: ${scannedValue}. It did not normalize to a valid ISBN. Try again or paste it manually.`
+      );
       return;
     }
 
@@ -381,24 +418,51 @@ export default function App() {
                 </View>
               ) : (
                 <View style={styles.cameraFrame}>
-                  <CameraView
-                    ref={cameraRef}
-                    style={styles.camera}
-                    facing="back"
-                    mode="picture"
-                    barcodeScannerSettings={{ barcodeTypes }}
-                    onBarcodeScanned={handleBarcodeScanned}
-                  />
+                  {isWeb ? (
+                    <WebBarcodeScanner
+                      ref={webScannerRef}
+                      mode={scannerMode}
+                      paused={submitting || scanLocked}
+                      onDetected={(value) => {
+                        void handleScannedValue(value, 'camera');
+                      }}
+                      onError={(message) => {
+                        setStatusMessage(message);
+                      }}
+                    />
+                  ) : (
+                    <CameraView
+                      ref={cameraRef}
+                      style={styles.camera}
+                      facing="back"
+                      mode="picture"
+                      barcodeScannerSettings={{ barcodeTypes }}
+                      onBarcodeScanned={handleBarcodeScanned}
+                    />
+                  )}
                   <View pointerEvents="box-none" style={styles.cameraOverlay}>
                     <View style={styles.cameraBadge}>
                       <Text style={styles.cameraBadgeText}>
-                        {scannerMode === 'shelf'
-                          ? 'Align shelf QR tag'
-                          : isWeb
-                            ? 'ISBN optional: enter it manually or capture the cover'
-                            : 'Align book barcode'}
+                            {scannerMode === 'shelf'
+                              ? 'Align the shelf QR inside the guide'
+                              : 'Align the book barcode inside the guide'}
                       </Text>
                     </View>
+                        <View style={styles.scanGuideWrap}>
+                          <View
+                            style={[
+                              styles.scanGuideFrame,
+                              scannerMode === 'shelf' ? styles.scanGuideSquare : styles.scanGuideWide,
+                            ]}
+                          >
+                            {scannerMode === 'book' ? <View style={styles.scanGuideLine} /> : null}
+                          </View>
+                          <Text style={styles.scanGuideText}>
+                            {scannerMode === 'shelf'
+                              ? 'Keep the full QR inside the frame'
+                              : 'Center the ISBN barcode inside the band'}
+                          </Text>
+                        </View>
                     <Pressable
                       style={[styles.captureButton, (!shelfReady || submitting) && styles.buttonDisabled]}
                       onPress={handleCaptureCover}
@@ -418,7 +482,7 @@ export default function App() {
                   <Text style={styles.caption}>
                     {scannerMode === 'shelf'
                       ? 'Browser QR detection can be unreliable. Paste the invscan://shelf/... payload here if the camera misses it.'
-                      : 'Expo web barcode support is limited. Paste the ISBN if needed, or skip it and submit only the cover image.'}
+                      : 'If the live scanner misses a damaged or faint barcode, paste the ISBN here or skip it and submit only the cover image.'}
                   </Text>
                   <Field
                     label={scannerMode === 'shelf' ? 'Shelf QR payload' : 'ISBN / barcode value'}
@@ -464,6 +528,16 @@ export default function App() {
               <Text style={styles.caption}>
                 These values are attached to the next scanned barcode or captured cover, then cleared.
               </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Last detected raw scan</Text>
+              <Text style={styles.caption}>
+                {lastDetectedSource
+                  ? `Source: ${lastDetectedSource === 'camera' ? 'camera' : 'manual input'}. This is the exact decoded content before ISBN normalization.`
+                  : 'This shows the exact decoded content before ISBN normalization.'}
+              </Text>
+              <Text style={styles.responseText}>{lastDetectedValue || 'No decoded value yet.'}</Text>
             </View>
 
             <View style={styles.card}>
@@ -605,6 +679,44 @@ const styles = StyleSheet.create({
   cameraBadgeText: {
     color: '#2e2418',
     fontWeight: '700',
+  },
+  scanGuideWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  scanGuideFrame: {
+    borderWidth: 2,
+    borderColor: 'rgba(255, 250, 242, 0.92)',
+    backgroundColor: 'rgba(255, 250, 242, 0.06)',
+    overflow: 'hidden',
+  },
+  scanGuideSquare: {
+    width: 190,
+    height: 190,
+    borderRadius: 24,
+  },
+  scanGuideWide: {
+    width: '82%',
+    maxWidth: 320,
+    height: 124,
+    borderRadius: 20,
+    justifyContent: 'center',
+  },
+  scanGuideLine: {
+    height: 3,
+    marginHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 250, 242, 0.92)',
+  },
+  scanGuideText: {
+    color: '#fffaf2',
+    fontWeight: '700',
+    textAlign: 'center',
+    textShadowColor: 'rgba(20, 12, 4, 0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
   captureButton: {
     alignSelf: 'center',

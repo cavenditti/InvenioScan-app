@@ -76,5 +76,12 @@ export function normalizeScannedIsbn(data: string): string | null {
   if (cleaned.length === 10 || cleaned.length === 13) {
     return cleaned;
   }
+
+  // Some live scanners concatenate the 5-digit EAN add-on to the ISBN.
+  const isbn13Match = cleaned.match(/97[89][0-9]{10}/);
+  if (isbn13Match) {
+    return isbn13Match[0];
+  }
+
   return null;
 }

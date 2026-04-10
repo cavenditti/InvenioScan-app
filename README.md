@@ -15,7 +15,7 @@ Minimal Expo client for the first implementation slice.
 - Login against the FastAPI backend.
 - Persist the JWT and backend URL in secure storage.
 - Submit manual ingest requests with shelf metadata.
-- On web, paste shelf QR payloads or ISBNs when browser scanning is unreliable.
+- On web, live ZXing scanning handles shelf QR codes and ISBN barcodes, with manual fallback when needed.
 - Capture and upload a book cover even when no ISBN is available.
 - Optionally fill in title and author.
 
