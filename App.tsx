@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -17,7 +18,7 @@ import {
   View,
 } from 'react-native';
 
-import { login, submitImageIngest, submitIsbnIngest } from './src/api';
+import { login, submitImageIngest, submitIsbnIngest, type IngestResponse } from './src/api';
 import { normalizeScannedIsbn, parseShelfPayload } from './src/scanner';
 import { clearSession, loadSession, saveSession } from './src/storage';
 import WebBarcodeScanner, { type WebBarcodeScannerCapture, type WebBarcodeScannerHandle } from './src/WebBarcodeScanner';
@@ -29,9 +30,20 @@ type FormState = {
   height: string;
   title: string;
   author: string;
+  publicationYear: string;
+  documentType: string;
+  language: string;
+  notes: string;
 };
 
 type ScanSource = 'camera' | 'manual';
+type CameraOverlayMode = 'scan' | 'cover';
+
+type SuccessDialogState = {
+  title: string;
+  message: string;
+  response: IngestResponse;
+};
 
 const initialFormState: FormState = {
   shelfId: '',
@@ -40,6 +52,10 @@ const initialFormState: FormState = {
   height: '1',
   title: '',
   author: '',
+  publicationYear: '',
+  documentType: '',
+  language: '',
+  notes: '',
 };
 
 export default function App() {
@@ -50,11 +66,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [scanLocked, setScanLocked] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Scan a shelf QR code to begin.');
-  const [lastDetectedValue, setLastDetectedValue] = useState('');
-  const [lastDetectedSource, setLastDetectedSource] = useState<ScanSource | null>(null);
-  const [lastResponse, setLastResponse] = useState<string>('');
-  const [manualScanValue, setManualScanValue] = useState('');
+  const [statusMessage, setStatusMessage] = useState('Scan a shelf tag to lock in the location.');
+  const [manualShelfValue, setManualShelfValue] = useState('');
+  const [manualIsbnValue, setManualIsbnValue] = useState('');
+  const [isShelfEditorOpen, setIsShelfEditorOpen] = useState(false);
+  const [isEnrichmentOpen, setIsEnrichmentOpen] = useState(false);
+  const [cameraOverlayMode, setCameraOverlayMode] = useState<CameraOverlayMode>('scan');
+  const [successDialog, setSuccessDialog] = useState<SuccessDialogState | null>(null);
   const [form, setForm] = useState<FormState>(initialFormState);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
@@ -68,14 +86,17 @@ export default function App() {
     form.shelfId.trim() && form.row.trim() && form.position.trim() && form.height.trim()
   );
   const scannerMode = shelfReady ? 'book' : 'shelf';
+  const isCoverCaptureMode = cameraOverlayMode === 'cover';
+  const scannerPaused = submitting || scanLocked || isCoverCaptureMode || Boolean(successDialog);
+  const operatorName = username.trim() || 'Operator';
   const barcodeTypes: BarcodeType[] = scannerMode === 'shelf'
     ? ['qr']
     : ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'];
   const cameraModeLabel = scannerMode === 'shelf'
-    ? 'Mode: shelf QR'
-    : isWeb
-      ? 'Mode: live ISBN scan, cover capture available'
-      : 'Mode: book barcode';
+    ? 'Scan the shelf tag once to lock the location.'
+    : isCoverCaptureMode
+      ? 'Cover mode is active. Frame the full cover before saving.'
+      : 'Scan ISBNs quickly, or switch to cover mode for books without a readable barcode.';
 
   useEffect(() => {
     async function restoreSession() {
@@ -83,6 +104,9 @@ export default function App() {
       if (session) {
         setToken(session.token);
         setBaseUrl(session.baseUrl);
+        if (session.username) {
+          setUsername(session.username);
+        }
       }
       setLoading(false);
     }
@@ -103,6 +127,12 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!shelfReady && cameraOverlayMode !== 'scan') {
+      setCameraOverlayMode('scan');
+    }
+  }, [cameraOverlayMode, shelfReady]);
 
   function updateForm<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -136,6 +166,10 @@ export default function App() {
       ...current,
       title: '',
       author: '',
+      publicationYear: '',
+      documentType: '',
+      language: '',
+      notes: '',
     }));
   }
 
@@ -147,9 +181,10 @@ export default function App() {
       const session = await login(normalizedBaseUrl, normalizedUsername, password);
       setToken(session.access_token);
       setBaseUrl(normalizedBaseUrl);
-      setStatusMessage('Scan a shelf QR code to begin.');
+      setUsername(normalizedUsername);
+      setStatusMessage('Scan a shelf tag to lock in the location.');
 
-      saveSession(session.access_token, normalizedBaseUrl).catch(() => undefined);
+      saveSession(session.access_token, normalizedBaseUrl, normalizedUsername).catch(() => undefined);
     } catch (error) {
       Alert.alert('Login failed', error instanceof Error ? error.message : 'Unknown error');
     } finally {
@@ -160,11 +195,59 @@ export default function App() {
   async function handleLogout() {
     await clearSession();
     setToken(null);
-    setLastDetectedValue('');
-    setLastDetectedSource(null);
-    setLastResponse('');
+    setManualShelfValue('');
+    setManualIsbnValue('');
+    setIsShelfEditorOpen(false);
+    setIsEnrichmentOpen(false);
+    setCameraOverlayMode('scan');
+    setSuccessDialog(null);
     setForm(initialFormState);
-    setStatusMessage('Scan a shelf QR code to begin.');
+    setStatusMessage('Scan a shelf tag to lock in the location.');
+  }
+
+  function buildBookMetadata() {
+    const publicationYearValue = form.publicationYear.trim();
+    let publicationYear: number | undefined;
+
+    if (publicationYearValue) {
+      const parsedPublicationYear = Number.parseInt(publicationYearValue, 10);
+      if (Number.isNaN(parsedPublicationYear)) {
+        return {
+          error: 'Publication year must be a whole number.',
+        };
+      }
+      publicationYear = parsedPublicationYear;
+    }
+
+    return {
+      metadata: {
+        title: form.title.trim() || undefined,
+        author: form.author.trim() || undefined,
+        publicationYear,
+        documentType: form.documentType.trim() || undefined,
+        language: form.language.trim() || undefined,
+        notes: form.notes.trim() || undefined,
+      },
+    };
+  }
+
+  function openSuccessDialog(title: string, message: string, response: IngestResponse) {
+    setSuccessDialog({ title, message, response });
+  }
+
+  function beginCoverCapture() {
+    if (!shelfReady) {
+      Alert.alert('Missing shelf', 'Scan or enter the shelf details first.');
+      return;
+    }
+
+    setCameraOverlayMode('cover');
+    setStatusMessage('Cover mode is active. Frame the full front cover, then tap Save cover.');
+  }
+
+  function cancelCoverCapture() {
+    setCameraOverlayMode('scan');
+    setStatusMessage('Back in barcode mode. Scan the next ISBN or switch back to cover mode.');
   }
 
   async function submitIsbn(isbn: string) {
@@ -178,23 +261,36 @@ export default function App() {
       return;
     }
 
+    const metadataResult = buildBookMetadata();
+    if ('error' in metadataResult) {
+      const errorMessage = metadataResult.error ?? 'Invalid book details.';
+      Alert.alert('Invalid book details', errorMessage);
+      setStatusMessage(errorMessage);
+      return;
+    }
+
+    let didSucceed = false;
+
     try {
       setSubmitting(true);
       const response = await submitIsbnIngest(baseUrl.trim(), token, {
         shelf,
         isbn,
-        title: form.title.trim() || undefined,
-        author: form.author.trim() || undefined,
+        ...metadataResult.metadata,
       });
-      setLastResponse(JSON.stringify(response, null, 2));
-      setStatusMessage(`Queued barcode ${isbn}`);
+      didSucceed = true;
+      setStatusMessage('Scan saved. Keep going on this shelf.');
+      openSuccessDialog('Scan saved', 'The server created a copy for this shelf position.', response);
       resetBookMetadata();
+      setIsEnrichmentOpen(false);
     } catch (error) {
       Alert.alert('ISBN ingest failed', error instanceof Error ? error.message : 'Unknown error');
       setStatusMessage('ISBN ingest failed.');
     } finally {
       setSubmitting(false);
-      lockScanner();
+      if (didSucceed) {
+        lockScanner();
+      }
     }
   }
 
@@ -209,7 +305,16 @@ export default function App() {
       return;
     }
 
+    const metadataResult = buildBookMetadata();
+    if ('error' in metadataResult) {
+      const errorMessage = metadataResult.error ?? 'Invalid book details.';
+      Alert.alert('Invalid book details', errorMessage);
+      setStatusMessage(errorMessage);
+      return;
+    }
+
     let webCapture: WebBarcodeScannerCapture | null = null;
+    let didSucceed = false;
 
     try {
       setSubmitting(true);
@@ -248,22 +353,26 @@ export default function App() {
       const response = await submitImageIngest(baseUrl.trim(), token, {
         shelf,
         imageUri,
-        title: form.title.trim() || undefined,
-        author: form.author.trim() || undefined,
+        ...metadataResult.metadata,
         mimeType,
         fileName,
       });
 
-      setLastResponse(JSON.stringify(response, null, 2));
-      setStatusMessage('Queued cover image upload. No ISBN required.');
+      didSucceed = true;
+      setCameraOverlayMode('scan');
+      setStatusMessage('Cover saved. Continue with the next book on this shelf.');
+      openSuccessDialog('Cover saved', 'The cover image was uploaded and a copy was created.', response);
       resetBookMetadata();
+      setIsEnrichmentOpen(false);
     } catch (error) {
       Alert.alert('Image ingest failed', error instanceof Error ? error.message : 'Unknown error');
       setStatusMessage('Image ingest failed.');
     } finally {
       webCapture?.revokeUri?.();
       setSubmitting(false);
-      lockScanner(1500);
+      if (didSucceed) {
+        lockScanner(1500);
+      }
     }
   }
 
@@ -284,9 +393,6 @@ export default function App() {
       return;
     }
 
-    setLastDetectedValue(scannedValue);
-    setLastDetectedSource(source);
-
     if (scannerMode === 'shelf') {
       const parsedShelf = parseShelfPayload(scannedValue);
       if (source === 'camera') {
@@ -294,6 +400,7 @@ export default function App() {
       }
 
       if (!parsedShelf) {
+        console.info('[Shelfscan] Ignored shelf candidate', { source, scannedValue });
         setStatusMessage(
           source === 'manual'
             ? 'Could not parse that shelf QR payload. Paste the full invscan://shelf/... value or fill the shelf fields below.'
@@ -309,25 +416,28 @@ export default function App() {
         position: String(parsedShelf.position),
         height: String(parsedShelf.height),
       }));
+      setIsShelfEditorOpen(false);
+      setCameraOverlayMode('scan');
       if (source === 'manual') {
-        setManualScanValue('');
+        setManualShelfValue('');
       }
-      setStatusMessage(`Shelf ${parsedShelf.shelfId} ready. Scan a barcode, or capture a cover if the book has no ISBN.`);
+      setStatusMessage(`Shelf ${parsedShelf.shelfId} locked in. Scan ISBNs, or switch to cover mode for books without barcodes.`);
       return;
     }
 
     const isbn = normalizeScannedIsbn(scannedValue);
     if (!isbn) {
+      console.info('[Shelfscan] Rejected non-ISBN barcode', { source, scannedValue });
       setStatusMessage(
         source === 'manual'
-          ? `That value is not a valid ISBN-10 or ISBN-13. Raw value: ${scannedValue}`
-          : `Detected barcode: ${scannedValue}. It did not normalize to a valid ISBN. Try again or paste it manually.`
+          ? 'That value is not a valid ISBN-10 or ISBN-13.'
+          : 'Detected a barcode, but it did not match a usable ISBN. Try again or paste it manually.'
       );
       return;
     }
 
     if (source === 'manual') {
-      setManualScanValue('');
+      setManualIsbnValue('');
     }
     await submitIsbn(isbn);
   }
@@ -336,8 +446,12 @@ export default function App() {
     void handleScannedValue(result.data, 'camera');
   }
 
-  function handleManualScanSubmit() {
-    void handleScannedValue(manualScanValue, 'manual');
+  function handleManualShelfSubmit() {
+    void handleScannedValue(manualShelfValue, 'manual');
+  }
+
+  function handleManualIsbnSubmit() {
+    void handleScannedValue(manualIsbnValue, 'manual');
   }
 
   function clearShelf() {
@@ -348,7 +462,10 @@ export default function App() {
       position: '1',
       height: '1',
     }));
-    setStatusMessage('Shelf cleared. Scan a shelf QR code to begin again.');
+    setManualShelfValue('');
+    setCameraOverlayMode('scan');
+    setIsShelfEditorOpen(false);
+    setStatusMessage('Shelf cleared. Scan the next shelf tag to begin again.');
   }
 
   if (loading) {
@@ -363,17 +480,36 @@ export default function App() {
     <SafeAreaView style={styles.screen}>
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.container}>
+        {token ? (
+          <View style={styles.operatorBar}>
+            <View style={styles.operatorAvatar}>
+              <Text style={styles.operatorAvatarText}>{operatorName.charAt(0).toUpperCase()}</Text>
+            </View>
+            <View style={styles.operatorMeta}>
+              <Text style={styles.operatorLabel}>Signed in as</Text>
+              <Text style={styles.operatorName}>{operatorName}</Text>
+              <Text style={styles.operatorHost}>{baseUrl}</Text>
+            </View>
+            <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={handleLogout}>
+              <Text style={styles.secondaryButtonText}>Logout</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={styles.hero}>
-          <Text style={styles.kicker}>Shelfscan</Text>
-          <Text style={styles.title}>Shelf first, then scan fast</Text>
+          <Text style={styles.kicker}>{token ? 'Scanning run' : 'Shelfscan'}</Text>
+          <Text style={styles.title}>{token ? 'One shelf, then move book by book' : 'Shelf-first intake'}</Text>
           <Text style={styles.subtitle}>
-            QR shelves and barcodes are auto-detected. Use the cover button when a barcode is missing.
+            {token
+              ? 'Lock the shelf once. Scan ISBNs quickly, or switch to cover mode for books without a readable barcode.'
+              : 'Sign in to start a compact shelf-based scanning run.'}
           </Text>
         </View>
 
         {!token ? (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Login</Text>
+            <Text style={styles.cardTitle}>Session setup</Text>
+            <Text style={styles.caption}>Connect to the backend and open a new scanning run.</Text>
             <Field label="Backend URL" value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" />
             <Field label="Username" value={username} onChangeText={setUsername} autoCapitalize="none" />
             <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
@@ -384,30 +520,108 @@ export default function App() {
         ) : (
           <>
             <View style={styles.card}>
-              <View style={[styles.cardHeaderRow, isCompactWebLayout && styles.cardHeaderStack]}>
-                <View style={styles.cardHeaderContent}>
-                  <Text style={styles.cardTitle}>Session active</Text>
-                  <Text style={styles.caption}>{baseUrl}</Text>
-                </View>
-                <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={handleLogout}>
-                  <Text style={styles.secondaryButtonText}>Logout</Text>
-                </Pressable>
-              </View>
+              <Text style={styles.cardTitle}>Run status</Text>
+              <Text style={styles.caption}>Connected to {baseUrl}</Text>
               <Text style={styles.statusLine}>{statusMessage}</Text>
             </View>
 
             <View style={styles.card}>
               <View style={[styles.cardHeaderRow, isCompactWebLayout && styles.cardHeaderStack]}>
                 <View style={styles.cardHeaderContent}>
-                  <Text style={styles.cardTitle}>Camera</Text>
-                  <Text style={styles.caption}>{cameraModeLabel}</Text>
+                  <Text style={styles.cardTitle}>Shelf</Text>
+                  <Text style={styles.caption}>
+                    {shelfReady
+                      ? 'This shelf stays active until you clear it.'
+                      : 'Scan a shelf tag or open the editor to enter the location manually.'}
+                  </Text>
                 </View>
-                {shelfReady ? (
-                  <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={clearShelf}>
-                    <Text style={styles.secondaryButtonText}>Done with shelf</Text>
+                <View style={[styles.inlineActionGroup, isCompactWebLayout && styles.inlineActionGroupStack]}>
+                  <Pressable
+                    style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]}
+                    onPress={() => setIsShelfEditorOpen((current) => !current)}
+                  >
+                    <Text style={styles.secondaryButtonText}>
+                      {isShelfEditorOpen ? 'Hide editor' : shelfReady ? 'Edit shelf' : 'Enter manually'}
+                    </Text>
                   </Pressable>
-                ) : null}
+                  {shelfReady ? (
+                    <Pressable style={[styles.secondaryButton, isCompactWebLayout && styles.secondaryButtonCompact]} onPress={clearShelf}>
+                      <Text style={styles.secondaryButtonText}>Done with shelf</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               </View>
+
+              {shelfReady ? (
+                <View style={styles.shelfSummaryRow}>
+                  <View style={styles.shelfSummaryChip}>
+                    <Text style={styles.shelfSummaryLabel}>Shelf</Text>
+                    <Text style={styles.shelfSummaryValue}>{form.shelfId}</Text>
+                  </View>
+                  <View style={styles.shelfSummaryChip}>
+                    <Text style={styles.shelfSummaryLabel}>Row</Text>
+                    <Text style={styles.shelfSummaryValue}>{form.row}</Text>
+                  </View>
+                  <View style={styles.shelfSummaryChip}>
+                    <Text style={styles.shelfSummaryLabel}>Position</Text>
+                    <Text style={styles.shelfSummaryValue}>{form.position}</Text>
+                  </View>
+                  <View style={styles.shelfSummaryChip}>
+                    <Text style={styles.shelfSummaryLabel}>Height</Text>
+                    <Text style={styles.shelfSummaryValue}>{form.height}</Text>
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.emptyShelfNotice}>
+                  <Text style={styles.statusLine}>No shelf locked in yet.</Text>
+                  <Text style={styles.caption}>Use the live scanner, or open the manual editor below.</Text>
+                </View>
+              )}
+
+              {isShelfEditorOpen ? (
+                <>
+                  <Field label="Shelf ID" value={form.shelfId} onChangeText={(value) => updateForm('shelfId', value)} />
+                  <View style={styles.inlineFields}>
+                    <View style={styles.inlineField}>
+                      <Field label="Row" value={form.row} onChangeText={(value) => updateForm('row', value)} />
+                    </View>
+                    <View style={styles.inlineField}>
+                      <Field label="Position" value={form.position} onChangeText={(value) => updateForm('position', value)} keyboardType="numeric" />
+                    </View>
+                    <View style={styles.inlineField}>
+                      <Field label="Height" value={form.height} onChangeText={(value) => updateForm('height', value)} keyboardType="numeric" />
+                    </View>
+                  </View>
+
+                  {isWeb ? (
+                    <View style={styles.manualScanBox}>
+                      <Text style={styles.manualScanTitle}>Paste a shelf tag</Text>
+                      <Text style={styles.caption}>
+                        If browser QR detection misses the tag, paste the full invscan://shelf/... payload here.
+                      </Text>
+                      <Field
+                        label="Shelf QR payload"
+                        value={manualShelfValue}
+                        onChangeText={setManualShelfValue}
+                        autoCapitalize="none"
+                        placeholder="invscan://shelf/A1?v=1&row=A&position=1&height=3"
+                      />
+                      <Pressable
+                        style={[styles.primaryButton, (!manualShelfValue.trim() || submitting) && styles.buttonDisabled]}
+                        onPress={handleManualShelfSubmit}
+                        disabled={!manualShelfValue.trim() || submitting}
+                      >
+                        <Text style={styles.primaryButtonText}>Use pasted shelf tag</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+                </>
+              ) : null}
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Camera</Text>
+              <Text style={styles.caption}>{cameraModeLabel}</Text>
 
               {!permission?.granted ? (
                 <View style={styles.permissionBox}>
@@ -422,7 +636,7 @@ export default function App() {
                     <WebBarcodeScanner
                       ref={webScannerRef}
                       mode={scannerMode}
-                      paused={submitting || scanLocked}
+                      paused={scannerPaused}
                       onDetected={(value) => {
                         void handleScannedValue(value, 'camera');
                       }}
@@ -437,116 +651,189 @@ export default function App() {
                       facing="back"
                       mode="picture"
                       barcodeScannerSettings={{ barcodeTypes }}
-                      onBarcodeScanned={handleBarcodeScanned}
+                      onBarcodeScanned={scannerPaused ? undefined : handleBarcodeScanned}
                     />
                   )}
                   <View pointerEvents="box-none" style={styles.cameraOverlay}>
                     <View style={styles.cameraBadge}>
                       <Text style={styles.cameraBadgeText}>
-                            {scannerMode === 'shelf'
-                              ? 'Align the shelf QR inside the guide'
-                              : 'Align the book barcode inside the guide'}
+                        {scannerMode === 'shelf'
+                          ? 'Shelf tag mode'
+                          : isCoverCaptureMode
+                            ? 'Cover framing mode'
+                            : 'ISBN scanning mode'}
                       </Text>
                     </View>
-                        <View style={styles.scanGuideWrap}>
-                          <View
-                            style={[
-                              styles.scanGuideFrame,
-                              scannerMode === 'shelf' ? styles.scanGuideSquare : styles.scanGuideWide,
-                            ]}
-                          >
-                            {scannerMode === 'book' ? <View style={styles.scanGuideLine} /> : null}
-                          </View>
-                          <Text style={styles.scanGuideText}>
-                            {scannerMode === 'shelf'
-                              ? 'Keep the full QR inside the frame'
-                              : 'Center the ISBN barcode inside the band'}
-                          </Text>
-                        </View>
-                    <Pressable
-                      style={[styles.captureButton, (!shelfReady || submitting) && styles.buttonDisabled]}
-                      onPress={handleCaptureCover}
-                      disabled={!shelfReady || submitting}
-                    >
-                      <Text style={styles.captureButtonText}>{submitting ? 'Working...' : 'Capture cover'}</Text>
-                    </Pressable>
+                    <View style={styles.scanGuideWrap}>
+                      <View
+                        style={[
+                          styles.scanGuideFrame,
+                          scannerMode === 'shelf'
+                            ? styles.scanGuideSquare
+                            : isCoverCaptureMode
+                              ? styles.scanGuideTall
+                              : styles.scanGuideWide,
+                        ]}
+                      >
+                        {scannerMode === 'book' && !isCoverCaptureMode ? <View style={styles.scanGuideLine} /> : null}
+                      </View>
+                      <Text style={styles.scanGuideText}>
+                        {scannerMode === 'shelf'
+                          ? 'Keep the full shelf tag inside the frame'
+                          : isCoverCaptureMode
+                            ? 'Fit the full front cover inside the border, then save it'
+                            : 'Center the ISBN barcode inside the band'}
+                      </Text>
+                    </View>
+
+                    {shelfReady ? (
+                      <View style={styles.cameraActionGroup}>
+                        {isCoverCaptureMode ? (
+                          <>
+                            <Pressable
+                              style={[styles.captureButton, submitting && styles.buttonDisabled]}
+                              onPress={handleCaptureCover}
+                              disabled={submitting}
+                            >
+                              <Text style={styles.captureButtonText}>{submitting ? 'Saving...' : 'Save cover'}</Text>
+                            </Pressable>
+                            <Pressable
+                              style={[styles.captureSecondaryButton, submitting && styles.buttonDisabled]}
+                              onPress={cancelCoverCapture}
+                              disabled={submitting}
+                            >
+                              <Text style={styles.captureSecondaryButtonText}>Back to barcode mode</Text>
+                            </Pressable>
+                          </>
+                        ) : scannerMode === 'book' ? (
+                          <Pressable style={[styles.captureButton, submitting && styles.buttonDisabled]} onPress={beginCoverCapture} disabled={submitting}>
+                            <Text style={styles.captureButtonText}>Switch to cover mode</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               )}
 
-              {isWeb ? (
+              {isWeb && scannerMode === 'book' ? (
                 <View style={styles.manualScanBox}>
-                  <Text style={styles.manualScanTitle}>
-                    {scannerMode === 'shelf' ? 'Manual shelf QR fallback' : 'Manual ISBN fallback'}
-                  </Text>
+                  <Text style={styles.manualScanTitle}>Manual ISBN fallback</Text>
                   <Text style={styles.caption}>
-                    {scannerMode === 'shelf'
-                      ? 'Browser QR detection can be unreliable. Paste the invscan://shelf/... payload here if the camera misses it.'
-                      : 'If the live scanner misses a damaged or faint barcode, paste the ISBN here or skip it and submit only the cover image.'}
+                    If the live scanner misses a damaged or faint barcode, paste the ISBN here or switch to cover mode and save the book cover instead.
                   </Text>
                   <Field
-                    label={scannerMode === 'shelf' ? 'Shelf QR payload' : 'ISBN / barcode value'}
-                    value={manualScanValue}
-                    onChangeText={setManualScanValue}
+                    label="ISBN / barcode value"
+                    value={manualIsbnValue}
+                    onChangeText={setManualIsbnValue}
                     autoCapitalize="none"
-                    keyboardType={scannerMode === 'shelf' ? 'default' : 'numbers-and-punctuation'}
-                    placeholder={scannerMode === 'shelf' ? 'invscan://shelf/A1?v=1&row=A&position=1&height=3' : '9781234567897'}
+                    keyboardType="numbers-and-punctuation"
+                    placeholder="9781234567897"
                   />
                   <Pressable
-                    style={[styles.primaryButton, (!manualScanValue.trim() || submitting) && styles.buttonDisabled]}
-                    onPress={handleManualScanSubmit}
-                    disabled={!manualScanValue.trim() || submitting}
+                    style={[styles.primaryButton, (!manualIsbnValue.trim() || submitting) && styles.buttonDisabled]}
+                    onPress={handleManualIsbnSubmit}
+                    disabled={!manualIsbnValue.trim() || submitting}
                   >
-                    <Text style={styles.primaryButtonText}>
-                      {scannerMode === 'shelf' ? 'Use pasted shelf tag' : 'Use pasted ISBN'}
-                    </Text>
+                    <Text style={styles.primaryButtonText}>Use pasted ISBN</Text>
                   </Pressable>
                 </View>
               ) : null}
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>Shelf context</Text>
-              <Field label="Shelf ID" value={form.shelfId} onChangeText={(value) => updateForm('shelfId', value)} />
-              <View style={styles.inlineFields}>
-                <View style={styles.inlineField}>
-                  <Field label="Row" value={form.row} onChangeText={(value) => updateForm('row', value)} />
+              <Pressable style={styles.sectionToggle} onPress={() => setIsEnrichmentOpen((current) => !current)}>
+                <View style={styles.cardHeaderContent}>
+                  <Text style={styles.cardTitle}>Optional book details</Text>
+                  <Text style={styles.caption}>
+                    Title, author, publication year, document type, language, and notes. These apply only to the next successful scan or cover save.
+                  </Text>
                 </View>
-                <View style={styles.inlineField}>
-                  <Field label="Position" value={form.position} onChangeText={(value) => updateForm('position', value)} keyboardType="numeric" />
-                </View>
-                <View style={styles.inlineField}>
-                  <Field label="Height" value={form.height} onChangeText={(value) => updateForm('height', value)} keyboardType="numeric" />
-                </View>
-              </View>
-            </View>
+                <Text style={styles.sectionToggleText}>{isEnrichmentOpen ? 'Hide' : 'Expand'}</Text>
+              </Pressable>
 
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Optional enrichment</Text>
-              <Field label="Title" value={form.title} onChangeText={(value) => updateForm('title', value)} />
-              <Field label="Author" value={form.author} onChangeText={(value) => updateForm('author', value)} />
-              <Text style={styles.caption}>
-                These values are attached to the next scanned barcode or captured cover, then cleared.
-              </Text>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Last detected raw scan</Text>
-              <Text style={styles.caption}>
-                {lastDetectedSource
-                  ? `Source: ${lastDetectedSource === 'camera' ? 'camera' : 'manual input'}. This is the exact decoded content before ISBN normalization.`
-                  : 'This shows the exact decoded content before ISBN normalization.'}
-              </Text>
-              <Text style={styles.responseText}>{lastDetectedValue || 'No decoded value yet.'}</Text>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Last response</Text>
-              <Text style={styles.responseText}>{lastResponse || 'No submission yet.'}</Text>
+              {isEnrichmentOpen ? (
+                <>
+                  <Field label="Title" value={form.title} onChangeText={(value) => updateForm('title', value)} />
+                  <Field label="Author" value={form.author} onChangeText={(value) => updateForm('author', value)} />
+                  <View style={styles.inlineFields}>
+                    <View style={styles.inlineField}>
+                      <Field
+                        label="Publication year"
+                        value={form.publicationYear}
+                        onChangeText={(value) => updateForm('publicationYear', value)}
+                        keyboardType="numeric"
+                        placeholder="1954"
+                      />
+                    </View>
+                    <View style={styles.inlineField}>
+                      <Field
+                        label="Document type"
+                        value={form.documentType}
+                        onChangeText={(value) => updateForm('documentType', value)}
+                        autoCapitalize="characters"
+                        placeholder="BOOK"
+                      />
+                    </View>
+                  </View>
+                  <Field
+                    label="Language"
+                    value={form.language}
+                    onChangeText={(value) => updateForm('language', value)}
+                    autoCapitalize="none"
+                    placeholder="en"
+                  />
+                  <Field
+                    label="Notes"
+                    value={form.notes}
+                    onChangeText={(value) => updateForm('notes', value)}
+                    multiline
+                    numberOfLines={4}
+                    placeholder="Anything the next ingest should retain about this book."
+                  />
+                </>
+              ) : (
+                <Text style={styles.caption}>Collapsed until you need to add manual book details.</Text>
+              )}
             </View>
           </>
         )}
       </ScrollView>
+
+      <Modal visible={Boolean(successDialog)} transparent animationType="fade" onRequestClose={() => setSuccessDialog(null)}>
+        <View style={styles.modalScrim}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalKicker}>Saved</Text>
+            <Text style={styles.modalTitle}>{successDialog?.title}</Text>
+            <Text style={styles.caption}>{successDialog?.message}</Text>
+
+            {successDialog ? (
+              <View style={styles.modalDetails}>
+                <View style={styles.modalDetailRow}>
+                  <Text style={styles.modalDetailLabel}>Status</Text>
+                  <Text style={styles.modalDetailValue}>{successDialog.response.status}</Text>
+                </View>
+                <View style={styles.modalDetailRow}>
+                  <Text style={styles.modalDetailLabel}>Book ID</Text>
+                  <Text style={styles.modalDetailValue}>{String(successDialog.response.book_id)}</Text>
+                </View>
+                <View style={styles.modalDetailRow}>
+                  <Text style={styles.modalDetailLabel}>Copy ID</Text>
+                  <Text style={styles.modalDetailValue}>{String(successDialog.response.copy_id)}</Text>
+                </View>
+                <View style={styles.modalDetailRowLast}>
+                  <Text style={styles.modalDetailLabel}>Scan ID</Text>
+                  <Text style={styles.modalDetailValueMono}>{successDialog.response.scan_id}</Text>
+                </View>
+              </View>
+            ) : null}
+
+            <Pressable style={styles.primaryButton} onPress={() => setSuccessDialog(null)}>
+              <Text style={styles.primaryButtonText}>Continue scanning</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -559,9 +846,11 @@ type FieldProps = {
   secureTextEntry?: boolean;
   keyboardType?: 'default' | 'numeric' | 'numbers-and-punctuation';
   placeholder?: string;
+  multiline?: boolean;
+  numberOfLines?: number;
 };
 
-function Field({ label, value, onChangeText, autoCapitalize, secureTextEntry, keyboardType, placeholder }: FieldProps) {
+function Field({ label, value, onChangeText, autoCapitalize, secureTextEntry, keyboardType, placeholder, multiline, numberOfLines }: FieldProps) {
   return (
     <View style={styles.fieldGroup}>
       <Text style={styles.label}>{label}</Text>
@@ -573,7 +862,10 @@ function Field({ label, value, onChangeText, autoCapitalize, secureTextEntry, ke
         keyboardType={keyboardType ?? 'default'}
         placeholder={placeholder}
         placeholderTextColor="#8a755d"
-        style={styles.input}
+        multiline={multiline}
+        numberOfLines={numberOfLines}
+        textAlignVertical={multiline ? 'top' : 'center'}
+        style={[styles.input, multiline && styles.inputMultiline]}
       />
     </View>
   );
@@ -593,6 +885,49 @@ const styles = StyleSheet.create({
   container: {
     padding: 20,
     gap: 18,
+  },
+  operatorBar: {
+    backgroundColor: '#fffaf2',
+    borderRadius: 24,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e8dbc6',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  operatorAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#8b5e34',
+  },
+  operatorAvatarText: {
+    color: '#fffaf2',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  operatorMeta: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  operatorLabel: {
+    color: '#8b5e34',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  operatorName: {
+    color: '#2e2418',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  operatorHost: {
+    color: '#7d684f',
   },
   hero: {
     paddingTop: 12,
@@ -644,12 +979,51 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  inlineActionGroup: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    justifyContent: 'flex-end',
+  },
+  inlineActionGroupStack: {
+    justifyContent: 'flex-start',
+  },
   caption: {
     color: '#7d684f',
   },
   statusLine: {
     color: '#2e2418',
     fontWeight: '600',
+  },
+  emptyShelfNotice: {
+    gap: 4,
+  },
+  shelfSummaryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  shelfSummaryChip: {
+    minWidth: 88,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 18,
+    backgroundColor: '#f1e2cf',
+    borderWidth: 1,
+    borderColor: '#e3d0b7',
+    gap: 2,
+  },
+  shelfSummaryLabel: {
+    color: '#8b5e34',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  shelfSummaryValue: {
+    color: '#2e2418',
+    fontSize: 16,
+    fontWeight: '700',
   },
   permissionBox: {
     gap: 12,
@@ -704,6 +1078,12 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
   },
+  scanGuideTall: {
+    width: '68%',
+    maxWidth: 260,
+    aspectRatio: 0.7,
+    borderRadius: 24,
+  },
   scanGuideLine: {
     height: 3,
     marginHorizontal: 16,
@@ -718,6 +1098,10 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
+  cameraActionGroup: {
+    alignItems: 'center',
+    gap: 10,
+  },
   captureButton: {
     alignSelf: 'center',
     backgroundColor: '#fffaf2',
@@ -729,6 +1113,19 @@ const styles = StyleSheet.create({
     color: '#6d3d14',
     fontWeight: '700',
     fontSize: 16,
+  },
+  captureSecondaryButton: {
+    alignSelf: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 250, 242, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 250, 242, 0.4)',
+  },
+  captureSecondaryButtonText: {
+    color: '#fffaf2',
+    fontWeight: '700',
   },
   manualScanBox: {
     gap: 12,
@@ -758,6 +1155,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     fontSize: 16,
     color: '#2e2418',
+  },
+  inputMultiline: {
+    minHeight: 116,
   },
   inlineFields: {
     flexDirection: 'row',
@@ -791,11 +1191,80 @@ const styles = StyleSheet.create({
   secondaryButtonCompact: {
     alignSelf: 'flex-start',
   },
+  sectionToggle: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  sectionToggleText: {
+    color: '#8b5e34',
+    fontWeight: '700',
+    paddingTop: 4,
+  },
   buttonDisabled: {
     opacity: 0.55,
   },
-  responseText: {
-    fontFamily: 'Courier',
+  modalScrim: {
+    flex: 1,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(20, 12, 4, 0.45)',
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: '#fffaf2',
+    borderRadius: 28,
+    padding: 22,
+    gap: 14,
+    borderWidth: 1,
+    borderColor: '#e8dbc6',
+  },
+  modalKicker: {
+    color: '#8b5e34',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1.1,
+    textTransform: 'uppercase',
+  },
+  modalTitle: {
     color: '#2e2418',
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: '700',
+  },
+  modalDetails: {
+    borderWidth: 1,
+    borderColor: '#eadbc8',
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  modalDetailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1e6d8',
+  },
+  modalDetailRowLast: {
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  modalDetailLabel: {
+    color: '#7d684f',
+    fontWeight: '600',
+  },
+  modalDetailValue: {
+    color: '#2e2418',
+    fontWeight: '700',
+  },
+  modalDetailValueMono: {
+    color: '#2e2418',
+    fontFamily: 'Courier',
   },
 });

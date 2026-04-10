@@ -18,6 +18,10 @@ export type IsbnIngestPayload = {
   isbn: string;
   title?: string;
   author?: string;
+  publicationYear?: number;
+  documentType?: string;
+  language?: string;
+  notes?: string;
 };
 
 export type ImageIngestPayload = {
@@ -25,6 +29,10 @@ export type ImageIngestPayload = {
   imageUri: string;
   title?: string;
   author?: string;
+  publicationYear?: number;
+  documentType?: string;
+  language?: string;
+  notes?: string;
   mimeType?: string;
   fileName?: string;
 };
@@ -100,6 +108,10 @@ export async function submitIsbnIngest(baseUrl: string, token: string, payload: 
       isbn: payload.isbn,
       title: payload.title,
       author: payload.author,
+      publication_year: payload.publicationYear,
+      document_type: payload.documentType,
+      language: payload.language,
+      notes: payload.notes,
     }),
   });
 
@@ -121,6 +133,18 @@ export async function submitImageIngest(baseUrl: string, token: string, payload:
   }
   if (payload.author) {
     formData.append('author', payload.author);
+  }
+  if (payload.publicationYear !== undefined) {
+    formData.append('publication_year', String(payload.publicationYear));
+  }
+  if (payload.documentType) {
+    formData.append('document_type', payload.documentType);
+  }
+  if (payload.language) {
+    formData.append('language', payload.language);
+  }
+  if (payload.notes) {
+    formData.append('notes', payload.notes);
   }
   await appendImageUpload(formData, payload);
 
