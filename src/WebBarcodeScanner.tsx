@@ -12,6 +12,7 @@ export type WebBarcodeScannerCapture = {
 
 export type WebBarcodeScannerHandle = {
   captureImageAsync: () => Promise<WebBarcodeScannerCapture>;
+  scanCurrentFrameAsync: () => Promise<string | null>;
 };
 
 export type WebBarcodeScannerProps = {

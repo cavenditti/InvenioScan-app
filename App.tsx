@@ -64,6 +64,7 @@ export default function App() {
   const [password, setPassword] = useState('operator');
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [frameScanning, setFrameScanning] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [scanLocked, setScanLocked] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Scan a shelf tag to lock in the location.');
@@ -91,7 +92,7 @@ export default function App() {
   const operatorName = username.trim() || 'Operator';
   const barcodeTypes: BarcodeType[] = scannerMode === 'shelf'
     ? ['qr']
-    : ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'];
+    : ['ean13'];
   const cameraModeLabel = scannerMode === 'shelf'
     ? 'Scan the shelf tag once to lock the location.'
     : isCoverCaptureMode
@@ -250,6 +251,30 @@ export default function App() {
     setStatusMessage('Back in barcode mode. Scan the next ISBN or switch back to cover mode.');
   }
 
+  async function handleFrameScan() {
+    if (!isWeb || !webScannerRef.current) {
+      return;
+    }
+
+    try {
+      setFrameScanning(true);
+      setStatusMessage('Analyzing the current frame for an ISBN...');
+      const scannedIsbn = await webScannerRef.current.scanCurrentFrameAsync();
+
+      if (!scannedIsbn) {
+        setStatusMessage('Could not read a valid ISBN from the current frame. Move closer, center the barcode, and try again.');
+        return;
+      }
+
+      await submitIsbn(scannedIsbn);
+    } catch (error) {
+      Alert.alert('Frame scan failed', error instanceof Error ? error.message : 'Unknown error');
+      setStatusMessage('Frame scan failed.');
+    } finally {
+      setFrameScanning(false);
+    }
+  }
+
   async function submitIsbn(isbn: string) {
     if (!token) {
       return;
@@ -377,7 +402,7 @@ export default function App() {
   }
 
   async function handleScannedValue(value: string, source: ScanSource) {
-    if (!token || submitting || (source === 'camera' && scanLocked)) {
+    if (!token || submitting || (source === 'camera' && (scanLocked || frameScanning))) {
       return;
     }
 
@@ -519,12 +544,6 @@ export default function App() {
           </View>
         ) : (
           <>
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Run status</Text>
-              <Text style={styles.caption}>Connected to {baseUrl}</Text>
-              <Text style={styles.statusLine}>{statusMessage}</Text>
-            </View>
-
             <View style={styles.card}>
               <View style={[styles.cardHeaderRow, isCompactWebLayout && styles.cardHeaderStack]}>
                 <View style={styles.cardHeaderContent}>
@@ -691,30 +710,52 @@ export default function App() {
                         {isCoverCaptureMode ? (
                           <>
                             <Pressable
-                              style={[styles.captureButton, submitting && styles.buttonDisabled]}
+                              style={[styles.captureButton, (submitting || frameScanning) && styles.buttonDisabled]}
                               onPress={handleCaptureCover}
-                              disabled={submitting}
+                              disabled={submitting || frameScanning}
                             >
                               <Text style={styles.captureButtonText}>{submitting ? 'Saving...' : 'Save cover'}</Text>
                             </Pressable>
                             <Pressable
-                              style={[styles.captureSecondaryButton, submitting && styles.buttonDisabled]}
+                              style={[styles.captureSecondaryButton, (submitting || frameScanning) && styles.buttonDisabled]}
                               onPress={cancelCoverCapture}
-                              disabled={submitting}
+                              disabled={submitting || frameScanning}
                             >
                               <Text style={styles.captureSecondaryButtonText}>Back to barcode mode</Text>
                             </Pressable>
                           </>
                         ) : scannerMode === 'book' ? (
-                          <Pressable style={[styles.captureButton, submitting && styles.buttonDisabled]} onPress={beginCoverCapture} disabled={submitting}>
-                            <Text style={styles.captureButtonText}>Switch to cover mode</Text>
-                          </Pressable>
+                          <>
+                            {isWeb ? (
+                              <Pressable
+                                style={[styles.captureButton, (submitting || frameScanning) && styles.buttonDisabled]}
+                                onPress={handleFrameScan}
+                                disabled={submitting || frameScanning}
+                              >
+                                <Text style={styles.captureButtonText}>{frameScanning ? 'Reading frame...' : 'Read visible barcode'}</Text>
+                              </Pressable>
+                            ) : null}
+                            <Pressable
+                              style={[
+                                isWeb ? styles.captureSecondaryButton : styles.captureButton,
+                                (submitting || frameScanning) && styles.buttonDisabled,
+                              ]}
+                              onPress={beginCoverCapture}
+                              disabled={submitting || frameScanning}
+                            >
+                              <Text style={isWeb ? styles.captureSecondaryButtonText : styles.captureButtonText}>Switch to cover mode</Text>
+                            </Pressable>
+                          </>
                         ) : null}
                       </View>
                     ) : null}
                   </View>
                 </View>
               )}
+
+              <View style={styles.cameraStatusBox}>
+                <Text style={styles.statusLine}>{statusMessage}</Text>
+              </View>
 
               {isWeb && scannerMode === 'book' ? (
                 <View style={styles.manualScanBox}>
@@ -731,9 +772,9 @@ export default function App() {
                     placeholder="9781234567897"
                   />
                   <Pressable
-                    style={[styles.primaryButton, (!manualIsbnValue.trim() || submitting) && styles.buttonDisabled]}
+                    style={[styles.primaryButton, (!manualIsbnValue.trim() || submitting || frameScanning) && styles.buttonDisabled]}
                     onPress={handleManualIsbnSubmit}
-                    disabled={!manualIsbnValue.trim() || submitting}
+                    disabled={!manualIsbnValue.trim() || submitting || frameScanning}
                   >
                     <Text style={styles.primaryButtonText}>Use pasted ISBN</Text>
                   </Pressable>
@@ -1132,6 +1173,10 @@ const styles = StyleSheet.create({
     paddingTop: 4,
     borderTopWidth: 1,
     borderTopColor: '#e8dbc6',
+  },
+  cameraStatusBox: {
+    gap: 4,
+    paddingTop: 2,
   },
   manualScanTitle: {
     fontSize: 16,

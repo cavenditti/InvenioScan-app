@@ -11,6 +11,8 @@ import 'webrtc-adapter';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, type CSSProperties } from 'react';
 import { StyleSheet, View } from 'react-native';
 
+import { normalizeContinuousScannedIsbn, normalizeScannedIsbn } from './scanner';
+
 export type WebBarcodeScannerMode = 'shelf' | 'book';
 
 export type WebBarcodeScannerCapture = {
@@ -22,6 +24,7 @@ export type WebBarcodeScannerCapture = {
 
 export type WebBarcodeScannerHandle = {
   captureImageAsync: () => Promise<WebBarcodeScannerCapture>;
+  scanCurrentFrameAsync: () => Promise<string | null>;
 };
 
 export type WebBarcodeScannerProps = {
@@ -32,8 +35,22 @@ export type WebBarcodeScannerProps = {
 };
 
 const MAX_CAPTURE_WIDTH = 1200;
+const MAX_SCAN_FRAME_WIDTH = 1600;
 const DUPLICATE_WINDOW_MS = 1400;
 const SHELF_SCAN_INTERVAL_MS = 180;
+const BOOK_STABLE_DETECTION_REQUIRED = 2;
+const BOOK_STABLE_DETECTION_WINDOW_MS = 1600;
+const BOOK_FRAME_SCAN_UPSCALE = 1.8;
+
+const BOOK_CONTINUOUS_FORMATS = new Set(['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39']);
+const BOOK_STABLE_DETECTION_REQUIRED_BY_FORMAT: Partial<Record<string, number>> = {
+  ean_13: 2,
+  ean_8: 3,
+  upc_a: 3,
+  upc_e: 3,
+  code_128: 3,
+  code_39: 4,
+};
 
 const BASE_SCAN_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: { ideal: 'environment' },
@@ -49,7 +66,14 @@ const SCAN_CONSTRAINTS: MediaStreamConstraints = {
 
 const SCAN_FORMATS: Record<WebBarcodeScannerMode, BarcodeFormat[]> = {
   shelf: [BarcodeFormat.QR_CODE],
-  book: [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E],
+  book: [
+    BarcodeFormat.EAN_13,
+    BarcodeFormat.EAN_8,
+    BarcodeFormat.UPC_A,
+    BarcodeFormat.UPC_E,
+    BarcodeFormat.CODE_128,
+    BarcodeFormat.CODE_39,
+  ],
 };
 
 const BOOK_QUAGGA_READERS: NonNullable<NonNullable<QuaggaJSConfigObject['decoder']>['readers']> = [
@@ -60,16 +84,25 @@ const BOOK_QUAGGA_READERS: NonNullable<NonNullable<QuaggaJSConfigObject['decoder
       supplements: ['ean_5_reader', 'ean_2_reader'],
     },
   },
+  'ean_8_reader',
   'upc_reader',
   'upc_e_reader',
-  'ean_8_reader',
+  'code_128_reader',
+  'code_39_reader',
 ];
 
 const BOOK_SCAN_AREA: NonNullable<NonNullable<QuaggaJSConfigObject['inputStream']>['area']> = {
-  top: '37%',
-  right: '8%',
-  bottom: '37%',
-  left: '8%',
+  top: '26%',
+  right: '4%',
+  bottom: '26%',
+  left: '4%',
+};
+
+const BOOK_FRAME_SCAN_CROP = {
+  top: 0.22,
+  right: 0.02,
+  bottom: 0.22,
+  left: 0.02,
 };
 
 const videoStyle: CSSProperties = {
@@ -212,6 +245,108 @@ async function attachCameraStream(video: HTMLVideoElement, videoConstraints: Med
 }
 
 
+function captureVideoFrameCanvas(video: HTMLVideoElement, maxWidth: number) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  const scale = sourceWidth > maxWidth ? maxWidth / sourceWidth : 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not capture a frame from the camera.');
+  }
+
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+
+function cropCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  crop: { top: number; right: number; bottom: number; left: number },
+  scale = 1
+) {
+  const sourceWidth = sourceCanvas.width;
+  const sourceHeight = sourceCanvas.height;
+  const cropX = Math.max(0, Math.round(sourceWidth * crop.left));
+  const cropY = Math.max(0, Math.round(sourceHeight * crop.top));
+  const cropWidth = Math.max(1, Math.round(sourceWidth * (1 - crop.left - crop.right)));
+  const cropHeight = Math.max(1, Math.round(sourceHeight * (1 - crop.top - crop.bottom)));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(cropWidth * scale));
+  canvas.height = Math.max(1, Math.round(cropHeight * scale));
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not prepare a cropped frame for barcode scanning.');
+  }
+
+  context.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+
+function rotateCanvas(sourceCanvas: HTMLCanvasElement, degrees: 0 | 180) {
+  if (degrees === 0) {
+    return sourceCanvas;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not prepare a rotated frame for barcode scanning.');
+  }
+
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((degrees * Math.PI) / 180);
+  context.drawImage(sourceCanvas, -sourceCanvas.width / 2, -sourceCanvas.height / 2);
+  return canvas;
+}
+
+
+function decodeBookCanvas(reader: BrowserMultiFormatReader, canvas: HTMLCanvasElement) {
+  try {
+    const result = reader.decodeFromCanvas(canvas);
+    return normalizeScannedIsbn(result.getText());
+  } catch (error) {
+    if (isRetryableDecodeError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+
+async function scanBookFrame(video: HTMLVideoElement) {
+  const frameCanvas = captureVideoFrameCanvas(video, MAX_SCAN_FRAME_WIDTH);
+  const croppedCanvas = cropCanvas(frameCanvas, BOOK_FRAME_SCAN_CROP);
+  const upscaledCroppedCanvas = cropCanvas(frameCanvas, BOOK_FRAME_SCAN_CROP, BOOK_FRAME_SCAN_UPSCALE);
+
+  const candidates = [
+    upscaledCroppedCanvas,
+    croppedCanvas,
+    frameCanvas,
+    rotateCanvas(upscaledCroppedCanvas, 180),
+    rotateCanvas(frameCanvas, 180),
+  ];
+
+  for (const candidate of candidates) {
+    const reader = new BrowserMultiFormatReader(buildHints('book'));
+    const isbn = decodeBookCanvas(reader, candidate);
+    if (isbn) {
+      return isbn;
+    }
+  }
+
+  return null;
+}
+
+
 function applyTargetPreviewStyles(target: HTMLDivElement | null) {
   if (!target) {
     return;
@@ -228,6 +363,7 @@ function applyTargetPreviewStyles(target: HTMLDivElement | null) {
   });
 }
 
+
 const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerProps>(function WebBarcodeScanner(
   { mode, paused = false, onDetected, onError },
   ref
@@ -243,6 +379,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
   const onDetectedRef = useRef(onDetected);
   const onErrorRef = useRef(onError);
   const lastDetectionRef = useRef<{ value: string; at: number }>({ value: '', at: 0 });
+  const bookCandidateRef = useRef<{ value: string; count: number; at: number }>({ value: '', count: 0, at: 0 });
   const lastErrorRef = useRef('');
 
   useEffect(() => {
@@ -323,19 +460,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
           throw new Error('Camera preview is not ready yet.');
         }
 
-        const sourceWidth = video.videoWidth;
-        const sourceHeight = video.videoHeight;
-        const scale = sourceWidth > MAX_CAPTURE_WIDTH ? MAX_CAPTURE_WIDTH / sourceWidth : 1;
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(sourceWidth * scale));
-        canvas.height = Math.max(1, Math.round(sourceHeight * scale));
-
-        const context = canvas.getContext('2d');
-        if (!context) {
-          throw new Error('Could not capture a frame from the camera.');
-        }
-
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const canvas = captureVideoFrameCanvas(video, MAX_CAPTURE_WIDTH);
 
         const blob = await new Promise<Blob>((resolve, reject) => {
           canvas.toBlob((value) => {
@@ -356,6 +481,19 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
           revokeUri: () => URL.revokeObjectURL(uri),
         };
       },
+
+      async scanCurrentFrameAsync() {
+        const video = getActiveVideo();
+        if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+          throw new Error('Camera preview is not ready yet.');
+        }
+
+        if (modeRef.current !== 'book') {
+          return null;
+        }
+
+        return await scanBookFrame(video);
+      },
     }),
     [getActiveVideo]
   );
@@ -369,6 +507,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
     let active = true;
     lastErrorRef.current = '';
     lastDetectionRef.current = { value: '', at: 0 };
+    bookCandidateRef.current = { value: '', count: 0, at: 0 };
 
     const emitDetection = (detectedValue: string) => {
       const now = Date.now();
@@ -454,8 +593,29 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
 
         const detectedHandler = (result: QuaggaJSResultObject) => {
           const detectedValue = result.codeResult?.code?.trim();
-          if (detectedValue) {
-            emitDetection(detectedValue);
+          const detectedFormat = result.codeResult?.format;
+          const normalizedIsbn = detectedValue ? normalizeContinuousScannedIsbn(detectedValue) : null;
+
+          if (!detectedFormat || !BOOK_CONTINUOUS_FORMATS.has(detectedFormat) || !normalizedIsbn) {
+            bookCandidateRef.current = { value: '', count: 0, at: 0 };
+            return;
+          }
+
+          const now = Date.now();
+          const candidate = bookCandidateRef.current;
+          const requiredDetections =
+            BOOK_STABLE_DETECTION_REQUIRED_BY_FORMAT[detectedFormat] ?? BOOK_STABLE_DETECTION_REQUIRED;
+          if (candidate.value === normalizedIsbn && now - candidate.at < BOOK_STABLE_DETECTION_WINDOW_MS) {
+            candidate.count += 1;
+            candidate.at = now;
+          } else {
+            bookCandidateRef.current = { value: normalizedIsbn, count: 1, at: now };
+            return;
+          }
+
+          if (candidate.count >= requiredDetections) {
+            bookCandidateRef.current = { value: '', count: 0, at: 0 };
+            emitDetection(normalizedIsbn);
           }
         };
 
@@ -470,15 +630,15 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
             area: BOOK_SCAN_AREA,
             willReadFrequently: true,
           },
-          locate: false,
+          locate: true,
           numOfWorkers: 0,
-          frequency: 10,
+          frequency: 12,
           canvas: {
             createOverlay: false,
           },
           locator: {
-            halfSample: true,
-            patchSize: 'medium',
+            halfSample: false,
+            patchSize: 'small',
           },
           decoder: {
             readers: BOOK_QUAGGA_READERS,
