@@ -42,6 +42,10 @@ export type IngestResponse = {
   book_id: number;
   copy_id: number;
   scan_id: string;
+  title?: string;
+  author?: string;
+  cover_image_url?: string;
+  enriched?: boolean;
 };
 
 async function parseJson(response: Response) {

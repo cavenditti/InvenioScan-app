@@ -453,11 +453,9 @@ export default function App() {
     const isbn = normalizeScannedIsbn(scannedValue);
     if (!isbn) {
       console.info('[Shelfscan] Rejected non-ISBN barcode', { source, scannedValue });
-      setStatusMessage(
-        source === 'manual'
-          ? 'That value is not a valid ISBN-10 or ISBN-13.'
-          : 'Detected a barcode, but it did not match a usable ISBN. Try again or paste it manually.'
-      );
+      if (source === 'manual') {
+        setStatusMessage('That value is not a valid ISBN-10 or ISBN-13.');
+      }
       return;
     }
 
@@ -850,9 +848,21 @@ export default function App() {
 
             {successDialog ? (
               <View style={styles.modalDetails}>
+                {successDialog.response.title ? (
+                  <View style={styles.modalDetailRow}>
+                    <Text style={styles.modalDetailLabel}>Title</Text>
+                    <Text style={styles.modalDetailValue}>{successDialog.response.title}</Text>
+                  </View>
+                ) : null}
+                {successDialog.response.author ? (
+                  <View style={styles.modalDetailRow}>
+                    <Text style={styles.modalDetailLabel}>Author</Text>
+                    <Text style={styles.modalDetailValue}>{successDialog.response.author}</Text>
+                  </View>
+                ) : null}
                 <View style={styles.modalDetailRow}>
                   <Text style={styles.modalDetailLabel}>Status</Text>
-                  <Text style={styles.modalDetailValue}>{successDialog.response.status}</Text>
+                  <Text style={styles.modalDetailValue}>{successDialog.response.status}{successDialog.response.enriched ? ' (enriched)' : ''}</Text>
                 </View>
                 <View style={styles.modalDetailRow}>
                   <Text style={styles.modalDetailLabel}>Book ID</Text>

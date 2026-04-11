@@ -11,7 +11,7 @@ import 'webrtc-adapter';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, type CSSProperties } from 'react';
 import { StyleSheet, View } from 'react-native';
 
-import { normalizeContinuousScannedIsbn, normalizeScannedIsbn } from './scanner';
+import { normalizeScannedIsbn } from './scanner';
 
 export type WebBarcodeScannerMode = 'shelf' | 'book';
 
@@ -38,18 +38,17 @@ const MAX_CAPTURE_WIDTH = 1200;
 const MAX_SCAN_FRAME_WIDTH = 1600;
 const DUPLICATE_WINDOW_MS = 1400;
 const SHELF_SCAN_INTERVAL_MS = 180;
-const BOOK_STABLE_DETECTION_REQUIRED = 2;
+const BOOK_STABLE_DETECTION_REQUIRED = 1;
 const BOOK_STABLE_DETECTION_WINDOW_MS = 1600;
 const BOOK_FRAME_SCAN_UPSCALE = 1.8;
 
 const BOOK_CONTINUOUS_FORMATS = new Set(['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39']);
 const BOOK_STABLE_DETECTION_REQUIRED_BY_FORMAT: Partial<Record<string, number>> = {
-  ean_13: 2,
-  ean_8: 3,
-  upc_a: 3,
-  upc_e: 3,
-  code_128: 3,
-  code_39: 4,
+  ean_8: 2,
+  upc_a: 2,
+  upc_e: 2,
+  code_128: 2,
+  code_39: 3,
 };
 
 const BASE_SCAN_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
@@ -92,10 +91,10 @@ const BOOK_QUAGGA_READERS: NonNullable<NonNullable<QuaggaJSConfigObject['decoder
 ];
 
 const BOOK_SCAN_AREA: NonNullable<NonNullable<QuaggaJSConfigObject['inputStream']>['area']> = {
-  top: '26%',
-  right: '4%',
-  bottom: '26%',
-  left: '4%',
+  top: '37%',
+  right: '8%',
+  bottom: '37%',
+  left: '8%',
 };
 
 const BOOK_FRAME_SCAN_CROP = {
@@ -594,28 +593,29 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
         const detectedHandler = (result: QuaggaJSResultObject) => {
           const detectedValue = result.codeResult?.code?.trim();
           const detectedFormat = result.codeResult?.format;
-          const normalizedIsbn = detectedValue ? normalizeContinuousScannedIsbn(detectedValue) : null;
 
-          if (!detectedFormat || !BOOK_CONTINUOUS_FORMATS.has(detectedFormat) || !normalizedIsbn) {
+          if (!detectedValue || !detectedFormat || !BOOK_CONTINUOUS_FORMATS.has(detectedFormat)) {
             bookCandidateRef.current = { value: '', count: 0, at: 0 };
             return;
           }
 
+          const normalizedIsbn = normalizeScannedIsbn(detectedValue);
+          const candidateValue = normalizedIsbn ?? detectedValue;
           const now = Date.now();
           const candidate = bookCandidateRef.current;
           const requiredDetections =
             BOOK_STABLE_DETECTION_REQUIRED_BY_FORMAT[detectedFormat] ?? BOOK_STABLE_DETECTION_REQUIRED;
-          if (candidate.value === normalizedIsbn && now - candidate.at < BOOK_STABLE_DETECTION_WINDOW_MS) {
+          if (candidate.value === candidateValue && now - candidate.at < BOOK_STABLE_DETECTION_WINDOW_MS) {
             candidate.count += 1;
             candidate.at = now;
           } else {
-            bookCandidateRef.current = { value: normalizedIsbn, count: 1, at: now };
+            bookCandidateRef.current = { value: candidateValue, count: 1, at: now };
             return;
           }
 
           if (candidate.count >= requiredDetections) {
             bookCandidateRef.current = { value: '', count: 0, at: 0 };
-            emitDetection(normalizedIsbn);
+            emitDetection(detectedValue);
           }
         };
 
@@ -630,15 +630,15 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
             area: BOOK_SCAN_AREA,
             willReadFrequently: true,
           },
-          locate: true,
+          locate: false,
           numOfWorkers: 0,
-          frequency: 12,
+          frequency: 10,
           canvas: {
             createOverlay: false,
           },
           locator: {
-            halfSample: false,
-            patchSize: 'small',
+            halfSample: true,
+            patchSize: 'medium',
           },
           decoder: {
             readers: BOOK_QUAGGA_READERS,
