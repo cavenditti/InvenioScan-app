@@ -18,6 +18,7 @@ export type WebBarcodeScannerHandle = {
 export type WebBarcodeScannerProps = {
   mode: WebBarcodeScannerMode;
   paused?: boolean;
+  detectionPaused?: boolean;
   onDetected: (value: string) => void;
   onError?: (message: string) => void;
 };

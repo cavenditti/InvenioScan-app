@@ -88,7 +88,8 @@ export default function App() {
   );
   const scannerMode = shelfReady ? 'book' : 'shelf';
   const isCoverCaptureMode = cameraOverlayMode === 'cover';
-  const scannerPaused = submitting || scanLocked || isCoverCaptureMode || Boolean(successDialog);
+  const cameraPreviewPaused = submitting || Boolean(successDialog);
+  const barcodeDetectionPaused = submitting || scanLocked || isCoverCaptureMode || Boolean(successDialog);
   const operatorName = username.trim() || 'Operator';
   const barcodeTypes: BarcodeType[] = scannerMode === 'shelf'
     ? ['qr']
@@ -402,7 +403,7 @@ export default function App() {
   }
 
   async function handleScannedValue(value: string, source: ScanSource) {
-    if (!token || submitting || (source === 'camera' && (scanLocked || frameScanning))) {
+    if (!token || submitting || (source === 'camera' && (scanLocked || frameScanning || isCoverCaptureMode))) {
       return;
     }
 
@@ -648,14 +649,17 @@ export default function App() {
                   </Pressable>
                 </View>
               ) : (
-                <View style={styles.cameraFrame}>
+                <View style={[styles.cameraFrame, isCoverCaptureMode && styles.cameraFrameCover]}>
                   {isWeb ? (
                     <WebBarcodeScanner
                       ref={webScannerRef}
                       mode={scannerMode}
-                      paused={scannerPaused}
+                      paused={cameraPreviewPaused}
+                      detectionPaused={barcodeDetectionPaused}
                       onDetected={(value) => {
-                        void handleScannedValue(value, 'camera');
+                        if (!barcodeDetectionPaused) {
+                          void handleScannedValue(value, 'camera');
+                        }
                       }}
                       onError={(message) => {
                         setStatusMessage(message);
@@ -668,10 +672,10 @@ export default function App() {
                       facing="back"
                       mode="picture"
                       barcodeScannerSettings={{ barcodeTypes }}
-                      onBarcodeScanned={scannerPaused ? undefined : handleBarcodeScanned}
+                      onBarcodeScanned={barcodeDetectionPaused ? undefined : handleBarcodeScanned}
                     />
                   )}
-                  <View pointerEvents="box-none" style={styles.cameraOverlay}>
+                  <View pointerEvents="box-none" style={[styles.cameraOverlay, isCoverCaptureMode && styles.cameraOverlayCover]}>
                     <View style={styles.cameraBadge}>
                       <Text style={styles.cameraBadgeText}>
                         {scannerMode === 'shelf'
@@ -681,7 +685,7 @@ export default function App() {
                             : 'ISBN scanning mode'}
                       </Text>
                     </View>
-                    <View style={styles.scanGuideWrap}>
+                    <View style={[styles.scanGuideWrap, isCoverCaptureMode && styles.scanGuideWrapCover]}>
                       <View
                         style={[
                           styles.scanGuideFrame,
@@ -694,7 +698,7 @@ export default function App() {
                       >
                         {scannerMode === 'book' && !isCoverCaptureMode ? <View style={styles.scanGuideLine} /> : null}
                       </View>
-                      <Text style={styles.scanGuideText}>
+                      <Text style={[styles.scanGuideText, isCoverCaptureMode && styles.scanGuideTextCover]}>
                         {scannerMode === 'shelf'
                           ? 'Keep the full shelf tag inside the frame'
                           : isCoverCaptureMode
@@ -704,7 +708,7 @@ export default function App() {
                     </View>
 
                     {shelfReady ? (
-                      <View style={styles.cameraActionGroup}>
+                      <View style={[styles.cameraActionGroup, isCoverCaptureMode && styles.cameraActionGroupCover]}>
                         {isCoverCaptureMode ? (
                           <>
                             <Pressable
@@ -1085,6 +1089,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     position: 'relative',
   },
+  cameraFrameCover: {
+    height: 600,
+  },
   camera: {
     flex: 1,
   },
@@ -1093,6 +1100,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     padding: 16,
     backgroundColor: 'rgba(20, 12, 4, 0.16)',
+  },
+  cameraOverlayCover: {
+    paddingVertical: 14,
   },
   cameraBadge: {
     alignSelf: 'flex-start',
@@ -1110,6 +1120,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
+  },
+  scanGuideWrapCover: {
+    justifyContent: 'center',
+    paddingTop: 18,
+    paddingBottom: 16,
+    gap: 8,
   },
   scanGuideFrame: {
     borderWidth: 2,
@@ -1130,10 +1146,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   scanGuideTall: {
-    width: '68%',
-    maxWidth: 260,
-    aspectRatio: 0.7,
-    borderRadius: 24,
+    width: '88%',
+    maxWidth: 340,
+    aspectRatio: 0.68,
+    borderRadius: 28,
   },
   scanGuideLine: {
     height: 3,
@@ -1149,9 +1165,15 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
+  scanGuideTextCover: {
+    maxWidth: 300,
+  },
   cameraActionGroup: {
     alignItems: 'center',
     gap: 10,
+  },
+  cameraActionGroupCover: {
+    gap: 8,
   },
   captureButton: {
     alignSelf: 'center',

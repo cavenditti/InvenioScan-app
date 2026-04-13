@@ -30,6 +30,7 @@ export type WebBarcodeScannerHandle = {
 export type WebBarcodeScannerProps = {
   mode: WebBarcodeScannerMode;
   paused?: boolean;
+  detectionPaused?: boolean;
   onDetected: (value: string) => void;
   onError?: (message: string) => void;
 };
@@ -364,7 +365,7 @@ function applyTargetPreviewStyles(target: HTMLDivElement | null) {
 
 
 const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerProps>(function WebBarcodeScanner(
-  { mode, paused = false, onDetected, onError },
+  { mode, paused = false, detectionPaused = false, onDetected, onError },
   ref
 ) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -377,6 +378,7 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
   const quaggaDetectedHandlerRef = useRef<((result: QuaggaJSResultObject) => void) | null>(null);
   const onDetectedRef = useRef(onDetected);
   const onErrorRef = useRef(onError);
+  const detectionPausedRef = useRef(detectionPaused);
   const lastDetectionRef = useRef<{ value: string; at: number }>({ value: '', at: 0 });
   const bookCandidateRef = useRef<{ value: string; count: number; at: number }>({ value: '', count: 0, at: 0 });
   const lastErrorRef = useRef('');
@@ -392,6 +394,13 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
   useEffect(() => {
     onErrorRef.current = onError;
   }, [onError]);
+
+  useEffect(() => {
+    detectionPausedRef.current = detectionPaused;
+    if (detectionPaused) {
+      bookCandidateRef.current = { value: '', count: 0, at: 0 };
+    }
+  }, [detectionPaused]);
 
   const stopQrScanner = useCallback(() => {
     if (scanTimerRef.current) {
@@ -591,6 +600,11 @@ const WebBarcodeScanner = forwardRef<WebBarcodeScannerHandle, WebBarcodeScannerP
         bookObserverRef.current = observer;
 
         const detectedHandler = (result: QuaggaJSResultObject) => {
+          if (detectionPausedRef.current) {
+            bookCandidateRef.current = { value: '', count: 0, at: 0 };
+            return;
+          }
+
           const detectedValue = result.codeResult?.code?.trim();
           const detectedFormat = result.codeResult?.format;
 
