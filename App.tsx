@@ -649,7 +649,7 @@ export default function App() {
                   </Pressable>
                 </View>
               ) : (
-                <View style={[styles.cameraFrame, isCoverCaptureMode && styles.cameraFrameCover]}>
+                <View style={styles.cameraFrame}>
                   {isWeb ? (
                     <WebBarcodeScanner
                       ref={webScannerRef}
@@ -1089,9 +1089,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     position: 'relative',
   },
-  cameraFrameCover: {
-    height: 600,
-  },
   camera: {
     flex: 1,
   },
@@ -1122,10 +1119,10 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   scanGuideWrapCover: {
-    justifyContent: 'center',
-    paddingTop: 18,
-    paddingBottom: 16,
-    gap: 8,
+    justifyContent: 'flex-start',
+    paddingTop: 8,
+    paddingBottom: 12,
+    gap: 10,
   },
   scanGuideFrame: {
     borderWidth: 2,
@@ -1146,10 +1143,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   scanGuideTall: {
-    width: '88%',
-    maxWidth: 340,
-    aspectRatio: 0.68,
-    borderRadius: 28,
+    height: '58%',
+    maxHeight: 228,
+    aspectRatio: 0.72,
+    borderRadius: 24,
   },
   scanGuideLine: {
     height: 3,
@@ -1166,7 +1163,7 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   scanGuideTextCover: {
-    maxWidth: 300,
+    maxWidth: 260,
   },
   cameraActionGroup: {
     alignItems: 'center',
