@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -883,6 +884,12 @@ export default function App() {
               </View>
             ) : null}
 
+            <Pressable
+              style={[styles.secondaryButton, { alignItems: 'center', marginBottom: 10 }]}
+              onPress={() => Linking.openURL(`${baseUrl}/books/${successDialog?.response.book_id}`)}
+            >
+              <Text style={styles.secondaryButtonText}>View in catalog</Text>
+            </Pressable>
             <Pressable style={styles.primaryButton} onPress={() => setSuccessDialog(null)}>
               <Text style={styles.primaryButtonText}>Continue scanning</Text>
             </Pressable>
