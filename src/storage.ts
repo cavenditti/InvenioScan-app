@@ -57,6 +57,17 @@ export async function clearSession() {
   await SecureStore.deleteItemAsync(USERNAME_KEY);
 }
 
+/**
+ * When running as a deployed web app, the backend is the same origin.
+ * This avoids the user having to type the URL manually.
+ */
+export function getDefaultBaseUrl(): string {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    return window.location.origin;
+  }
+  return 'http://127.0.0.1:8000';
+}
+
 export async function loadSession() {
   let token: string | null = null;
   let baseUrl: string | null = null;

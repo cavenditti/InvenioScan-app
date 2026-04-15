@@ -20,7 +20,7 @@ import {
 
 import { login, submitImageIngest, submitIsbnIngest, type IngestResponse } from './src/api';
 import { normalizeScannedIsbn, parseShelfPayload } from './src/scanner';
-import { clearSession, loadSession, saveSession } from './src/storage';
+import { clearSession, getDefaultBaseUrl, loadSession, saveSession } from './src/storage';
 import WebBarcodeScanner, { type WebBarcodeScannerCapture, type WebBarcodeScannerHandle } from './src/WebBarcodeScanner';
 
 type FormState = {
@@ -59,7 +59,7 @@ const initialFormState: FormState = {
 };
 
 export default function App() {
-  const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:8000');
+  const [baseUrl, setBaseUrl] = useState(getDefaultBaseUrl());
   const [username, setUsername] = useState('operator');
   const [password, setPassword] = useState('operator');
   const [token, setToken] = useState<string | null>(null);
